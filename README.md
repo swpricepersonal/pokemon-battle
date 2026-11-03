@@ -10,7 +10,20 @@ npm run dev      # start the dev server, then open the printed URL
 npm test         # engine unit tests
 npm run build    # production build in dist/
 npm run build:artifact  # one standalone HTML page in dist-artifact/
+npm run preview  # serve the production build (installable, works offline)
 ```
+
+## Install it on a phone
+
+The app is published with GitHub Pages at **https://swpricepersonal.github.io/pokemon-battle/** (every push to `main` runs the tests and redeploys).
+
+**iPhone / iPad:** open that link in Safari, tap the **Share** button, then **Add to Home Screen**. It gets its own icon, opens full-screen like an app, and works with no internet connection after the first visit.
+
+**Android:** open the link in Chrome and tap **Install app** (or ⋮ → **Add to Home screen**).
+
+Saved builds live on each device. To send builds to someone, use **Share** (or **Copy JSON**) under *My saved builds*; they use **Import JSON** to add them.
+
+Updates arrive automatically: the next time the app is opened with a connection it picks up the newest version.
 
 ## Features
 

@@ -158,6 +158,24 @@ function LibraryPanel({
   const fileInput = useRef<HTMLInputElement>(null);
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
 
+  const buildsFile = () => new File([JSON.stringify(library, null, 2)], 'battle-builds.json', { type: 'application/json' });
+  const canShareFiles = (() => {
+    try {
+      return !import.meta.env.VITE_ARTIFACT && typeof navigator.canShare === 'function'
+        && navigator.canShare({ files: [new File(['[]'], 'x.json', { type: 'application/json' })] });
+    } catch {
+      return false;
+    }
+  })();
+
+  async function shareJson() {
+    try {
+      await navigator.share({ files: [buildsFile()], title: 'Battle Simulator builds' });
+    } catch (err) {
+      if ((err as DOMException)?.name !== 'AbortError') setNotice('Sharing didn’t work here. Try Copy JSON instead.');
+    }
+  }
+
   async function copyJson() {
     try {
       await navigator.clipboard.writeText(JSON.stringify(library, null, 2));
@@ -201,6 +219,7 @@ function LibraryPanel({
           {!import.meta.env.VITE_ARTIFACT && (
             <button onClick={exportJson} disabled={!library.length}>Export JSON</button>
           )}
+          {canShareFiles && <button onClick={shareJson} disabled={!library.length}>Share</button>}
           <button onClick={copyJson} disabled={!library.length}>Copy JSON</button>
           <button onClick={() => fileInput.current?.click()}>Import JSON</button>
           <input
