@@ -126,3 +126,76 @@ describe('Leech Seed', () => {
     expect(mon(s, 'p1a').currentHp).toBe(10 + Math.floor(mon(s, 'p2b').stats.hp / 8));
   });
 });
+
+describe('Disable', () => {
+  it('fails with no previous move, then blocks the last move for 4 turns', () => {
+    let s = singles(fast('A', ['Disable', 'Swords Dance']), slow('B', ['Tackle', 'Growl']));
+    s = runTurn(s, sc(0, 0)); // B hasn't used a move yet
+    expect(texts(s)).toContain('But it failed!');
+    s = runTurn(s, sc(0, 0)); // B used Tackle last turn; it's disabled before B moves
+    expect(texts(s)).toContain("B's Tackle was disabled!");
+    expect(texts(s)).toContain("B's Tackle is disabled!");
+    expect(availableChoices(mon(s, 'p2a'))).toEqual([1]);
+    for (let i = 0; i < 2; i++) s = runTurn(s, sc(1, 1));
+    expect(texts(s)).not.toContain("B's move is no longer disabled!");
+    s = runTurn(s, sc(1, 1));
+    expect(texts(s)).toContain("B's move is no longer disabled!");
+    expect(availableChoices(mon(s, 'p2a'))).toEqual([0, 1]);
+  });
+});
+
+describe('Torment', () => {
+  it('stops the target from using the same move twice in a row', () => {
+    let s = singles(fast('A', ['Swords Dance', 'Torment']), slow('B', ['Tackle', 'Growl']));
+    s = runTurn(s, sc(0, 0)); // B uses Tackle
+    s = runTurn(s, sc(1, 0)); // A torments B before B repeats Tackle
+    expect(texts(s)).toContain('B was subjected to torment!');
+    expect(texts(s)).toContain("B can't use the same move twice in a row due to the torment!");
+    s = runTurn(s, sc(0, 1)); // B uses Growl
+    expect(availableChoices(mon(s, 'p2a'))).toEqual([0]);
+    s = runTurn(s, sc(0, 0));
+    expect(availableChoices(mon(s, 'p2a'))).toEqual([1]);
+  });
+});
+
+describe('Yawn', () => {
+  it('puts the target to sleep at the end of the next turn', () => {
+    let s = runTurn(singles(fast('A', ['Yawn', 'Swords Dance']), slow('B', ['Swords Dance'])), sc(0, 0));
+    expect(texts(s)).toContain('B grew drowsy!');
+    expect(mon(s, 'p2a').status).toBeNull();
+    s = runTurn(s, sc(1, 0));
+    expect(mon(s, 'p2a').status).toBe('slp');
+  });
+
+  it('fails against Insomnia, a status condition, or a Substitute', () => {
+    let s = runTurn(singles(fast('A', ['Yawn']), slow('I', ['Swords Dance'], { ability: 'Insomnia' })), sc(0, 0));
+    expect(mon(s, 'p2a').yawn).toBe(0);
+    const burned = singles(fast('A', ['Yawn']), slow('B', ['Swords Dance']));
+    mon(burned, 'p2a').status = 'brn';
+    s = runTurn(burned, sc(0, 0));
+    expect(mon(s, 'p2a').yawn).toBe(0);
+    s = runTurn(singles(slow('A', ['Yawn']), fast('S', ['Substitute'])), sc(0, 0));
+    expect(mon(s, 'p2a').yawn).toBe(0);
+  });
+});
+
+describe('Perish Song', () => {
+  it('makes every Pokémon that hears it faint after three more turns', () => {
+    let s = singles(fast('A', ['Perish Song', 'Swords Dance']), slow('B', ['Swords Dance']));
+    s = runTurn(s, sc(0, 0));
+    expect(texts(s)).toContain('All Pokémon that hear the song will faint in three turns!');
+    expect(texts(s)).toContain("A's perish count fell to 3.");
+    s = runTurn(s, sc(1, 0));
+    s = runTurn(s, sc(1, 0));
+    expect(s.winner).toBeNull();
+    s = runTurn(s, sc(1, 0));
+    expect(s.winner).toBe('draw');
+  });
+
+  it('Soundproof is immune', () => {
+    let s = singles(fast('A', ['Perish Song', 'Swords Dance']), slow('S', ['Swords Dance'], { ability: 'Soundproof' }));
+    s = runTurn(s, sc(0, 0));
+    for (let i = 0; i < 3; i++) s = runTurn(s, sc(1, 0));
+    expect(s.winner).toBe(1);
+  });
+});

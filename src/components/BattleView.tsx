@@ -158,7 +158,8 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
         Atk {mon.stats.atk} · Def {mon.stats.def} · SpA {mon.stats.spa} · SpD {mon.stats.spd} · Spe {mon.stats.spe}
         {speed !== mon.stats.spe && <> (effective {speed})</>}
       </div>
-      {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0 || mon.substituteHp > 0 || mon.taunt > 0 || mon.encore || mon.leechSeed) && (
+      {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0 || mon.substituteHp > 0 || mon.taunt > 0 || mon.encore || mon.leechSeed
+        || mon.disable || mon.torment || mon.yawn > 0 || mon.perishCount > 0) && (
         <div className="chips">
           {mon.status && (
             <span className="chip">
@@ -172,6 +173,10 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
           {mon.taunt > 0 && <span className="chip">Taunted · {mon.taunt} turn{mon.taunt === 1 ? '' : 's'}</span>}
           {mon.encore && <span className="chip">Encore: {mon.build.moves[mon.encore.move]?.name} · {mon.encore.turns} turn{mon.encore.turns === 1 ? '' : 's'}</span>}
           {mon.leechSeed && <span className="chip">Seeded</span>}
+          {mon.disable && <span className="chip">Disabled: {mon.build.moves[mon.disable.move]?.name} · {mon.disable.turns} turn{mon.disable.turns === 1 ? '' : 's'}</span>}
+          {mon.torment && <span className="chip">Tormented</span>}
+          {mon.yawn > 0 && <span className="chip">Drowsy · falls asleep at the end of {mon.yawn === 1 ? 'this turn' : 'next turn'}</span>}
+          {mon.perishCount > 0 && <span className="chip down">Perish count {mon.perishCount}</span>}
           {lockedMove && <span className="chip">Locked into {lockedMove}</span>}
           {boosts.map((k) => (
             <span key={k} className={`chip ${mon.boosts[k] > 0 ? 'up' : 'down'}`}>

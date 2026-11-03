@@ -126,6 +126,10 @@ export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 
     encore: null,
     substituteHp: 0,
     leechSeed: null,
+    disable: null,
+    torment: false,
+    yawn: 0,
+    perishCount: 0,
     vol: freshVolatiles(),
   };
 }
@@ -200,11 +204,17 @@ export function foesOf(state: BattleState, mon: BattlePokemon): BattlePokemon[] 
 }
 
 /** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
+/** Disabled, or the move Torment forbids repeating. */
+function moveBlocked(mon: BattlePokemon, slot: number): boolean {
+  return (mon.disable?.move === slot) || (mon.torment && mon.lastAction?.move === slot);
+}
+
 export function availableChoices(mon: BattlePokemon): MoveChoice[] {
   const item = getItem(mon);
-  if (mon.encore && mon.pp[mon.encore.move] > 0 && mon.build.moves[mon.encore.move]) return [mon.encore.move];
+  const enc = mon.encore;
+  if (enc && mon.pp[enc.move] > 0 && mon.build.moves[enc.move]) return moveBlocked(mon, enc.move) ? [STRUGGLE_INDEX] : [enc.move];
   const choices = mon.build.moves.flatMap((m, i) => {
-    if (!m || mon.pp[i] <= 0) return [];
+    if (!m || mon.pp[i] <= 0 || moveBlocked(mon, i)) return [];
     if (mon.choiceLock !== null && mon.choiceLock !== i) return [];
     if (item?.noStatusMoves && m.category === 'Status') return [];
     if (mon.taunt > 0 && m.category === 'Status') return [];
@@ -658,6 +668,14 @@ class TurnRunner {
     }
 
     const struggle = action.move === STRUGGLE_INDEX;
+    if (!struggle && user.disable?.move === action.move) {
+      this.log('info', `${user.name}'s ${entry.move.name} is disabled!`, user.side);
+      return;
+    }
+    if (!struggle && user.torment && user.lastAction?.move === action.move) {
+      this.log('info', `${user.name} can't use the same move twice in a row due to the torment!`, user.side);
+      return;
+    }
     if (!struggle && user.taunt > 0 && entry.move.category === 'Status') {
       this.log('info', `${user.name} can't use ${entry.move.name} after the taunt!`, user.side);
       return;
@@ -730,6 +748,20 @@ class TurnRunner {
       case 'fakeOut':
         if (user.turnsActive > 0) return this.fail();
         break;
+      case 'perishSong': {
+        const hearers = allMons(this.s).filter((m) => isAlive(m) && m.perishCount === 0);
+        if (!hearers.length) return this.fail();
+        this.log('field', 'All Pokémon that hear the song will faint in three turns!', user.side);
+        for (const m of hearers) {
+          const ab = m === user ? getAbility(m) : defenderAbility(m, user);
+          if (ab?.immune?.({ attacker: user, defender: m, move, eff: 1, crit: false, fromAlly: false })) {
+            this.log('info', `${m.name}'s ${abilityName(m)} blocks the song!`, m.side);
+            continue;
+          }
+          m.perishCount = 4;
+        }
+        return;
+      }
       case 'substitute': {
         const cost = Math.floor(user.stats.hp / 4);
         if (user.substituteHp > 0) return this.log('info', `${user.name} already has a substitute!`, user.side);
@@ -799,7 +831,7 @@ class TurnRunner {
           anyHit = true;
           totalDealt += dealt;
         }
-      } else if (sp === 'taunt' || sp === 'encore' || sp === 'leechSeed') {
+      } else if (sp === 'taunt' || sp === 'encore' || sp === 'leechSeed' || sp === 'disable' || sp === 'torment' || sp === 'yawn') {
         if (this.volatileMove(user, t, move, sp)) anyHit = true;
       } else if (this.statusEffect(user, t, move)) {
         anyHit = true;
@@ -1134,10 +1166,31 @@ class TurnRunner {
     return false;
   }
 
-  /** Taunt, Encore and Leech Seed. Returns true if it took effect. */
-  volatileMove(user: BattlePokemon, t: BattlePokemon, move: Move, sp: 'taunt' | 'encore' | 'leechSeed'): boolean {
-    // Taunt and Encore go through a Substitute; Leech Seed doesn't.
-    if (this.statusMoveStopped(user, t, move, sp !== 'leechSeed')) return false;
+  /** Taunt, Encore, Leech Seed, Disable, Torment and Yawn. Returns true if it took effect. */
+  volatileMove(user: BattlePokemon, t: BattlePokemon, move: Move, sp: 'taunt' | 'encore' | 'leechSeed' | 'disable' | 'torment' | 'yawn'): boolean {
+    // Taunt, Encore, Disable and Torment go through a Substitute; Leech Seed and Yawn don't.
+    if (this.statusMoveStopped(user, t, move, sp !== 'leechSeed' && sp !== 'yawn')) return false;
+    if (sp === 'disable') {
+      const last = t.lastAction;
+      const lastMove = last ? t.build.moves[last.move] : null;
+      if (t.disable || !last || !lastMove || t.pp[last.move] <= 0) return this.fail(), false;
+      // Blocks 4 of the target's turns: this one if it hasn't moved yet, otherwise the next 4.
+      t.disable = { move: last.move, turns: t.vol.moved ? 5 : 4 };
+      this.log('status', `${t.name}'s ${lastMove.name} was disabled!`, t.side);
+      return true;
+    }
+    if (sp === 'torment') {
+      if (t.torment) return this.fail(), false;
+      t.torment = true;
+      this.log('status', `${t.name} was subjected to torment!`, t.side);
+      return true;
+    }
+    if (sp === 'yawn') {
+      if (t.status || t.yawn > 0 || !this.canInflict(t, 'slp', user)) return this.fail(), false;
+      t.yawn = 2;
+      this.log('status', `${t.name} grew drowsy!`, t.side);
+      return true;
+    }
     // Effects that last "3 turns" get an extra turn if the target has already moved this turn.
     const turns = t.vol.moved ? 4 : 3;
     if (sp === 'taunt') {
@@ -1268,9 +1321,23 @@ class TurnRunner {
       this.log('field', `The ${TERRAIN_LABELS[this.s.terrain]} disappeared.`);
       this.s.terrain = null;
     }
+    // Yawn and Perish Song
+    for (const mon of order()) {
+      if (mon.yawn > 0 && --mon.yawn === 0 && this.canInflict(mon, 'slp', null)) this.inflict(mon, 'slp');
+    }
+    for (const mon of order()) {
+      if (mon.perishCount <= 0) continue;
+      mon.perishCount--;
+      this.log('status', `${mon.name}'s perish count fell to ${mon.perishCount}.`, mon.side);
+      if (mon.perishCount === 0) mon.currentHp = 0;
+    }
     for (const mon of allMons(this.s)) {
       if (!isAlive(mon)) continue;
       if (mon.taunt > 0 && --mon.taunt === 0) this.log('status', `${mon.name} shook off the taunt!`, mon.side);
+      if (mon.disable && --mon.disable.turns <= 0) {
+        mon.disable = null;
+        this.log('status', `${mon.name}'s move is no longer disabled!`, mon.side);
+      }
       if (mon.encore && (--mon.encore.turns <= 0 || mon.pp[mon.encore.move] <= 0)) {
         mon.encore = null;
         this.log('status', `${mon.name}'s encore ended!`, mon.side);

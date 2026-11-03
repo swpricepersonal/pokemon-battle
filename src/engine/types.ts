@@ -89,7 +89,7 @@ export const MOVE_SPECIALS = [
   'allySwitch', 'afterYou', 'quash', 'pollenPuff', 'tailwind', 'trickRoom', 'reflect', 'lightScreen',
   'sunnyDay', 'rainDance', 'sandstorm', 'snowscape', 'electricTerrain', 'grassyTerrain', 'psychicTerrain', 'mistyTerrain',
   'weatherBall', 'stormAccuracy', 'snowAccuracy', 'instruct', 'beatUp',
-  'taunt', 'encore', 'substitute', 'leechSeed',
+  'taunt', 'encore', 'substitute', 'leechSeed', 'disable', 'torment', 'yawn', 'perishSong',
 ] as const;
 export type MoveSpecial = (typeof MOVE_SPECIALS)[number];
 
@@ -127,6 +127,10 @@ export const MOVE_SPECIAL_LABELS: Record<MoveSpecial, string> = {
   encore: 'Encore (target repeats its last move, 3 turns)',
   substitute: 'Substitute (costs 1/4 HP, absorbs attacks)',
   leechSeed: 'Leech Seed (drains 1/8 HP each turn)',
+  disable: 'Disable (target’s last move unusable, 4 turns)',
+  torment: 'Torment (target can’t repeat a move)',
+  yawn: 'Yawn (target falls asleep next turn)',
+  perishSong: 'Perish Song (all who hear it faint in 3 turns)',
 };
 
 export interface Move {
@@ -265,7 +269,15 @@ export interface BattlePokemon {
   substituteHp: number;
   /** Seeded by Leech Seed: the field position that receives the drained HP. */
   leechSeed: { side: Side; slot: number } | null;
-  /** The last move this Pokémon used (for Instruct and Encore). */
+  /** Disable: the move slot that can't be used and turns left. */
+  disable: { move: number; turns: number } | null;
+  /** Can't use the same move twice in a row. */
+  torment: boolean;
+  /** Yawn: turns until it falls asleep (0 = not drowsy). */
+  yawn: number;
+  /** Perish Song count (0 = none); faints when it reaches 0 from 1. */
+  perishCount: number;
+  /** The last move this Pokémon used (for Instruct, Encore, Disable and Torment). */
   lastAction: { move: number; target?: { side: Side; slot: number } } | null;
   vol: TurnVolatiles;
 }

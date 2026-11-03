@@ -17,7 +17,7 @@ const FLAG_LISTS: Record<MoveFlag, string[]> = {
   punch: ['Fire Punch', 'Thunder Punch', 'Ice Punch', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Bullet Punch'],
   bite: ['Crunch'],
   pulse: ['Water Pulse', 'Aura Sphere', 'Dragon Pulse', 'Dark Pulse', 'Heal Pulse'],
-  sound: ['Hyper Voice', 'Bug Buzz', 'Snarl', 'Growl', 'Screech'],
+  sound: ['Hyper Voice', 'Bug Buzz', 'Snarl', 'Growl', 'Screech', 'Perish Song'],
   powder: ['Spore', 'Rage Powder'],
 };
 
@@ -62,6 +62,9 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Swagger', 'Normal', 'Status', 0, 85, 15, { effects: { targetBoosts: { boosts: { atk: 2 }, chance: 100 }, confuse: 100 } }),
   mv('Encore', 'Normal', 'Status', 0, 100, 5, { target: 'normal', special: 'encore' }),
   mv('Substitute', 'Normal', 'Status', 0, null, 10, { special: 'substitute' }),
+  mv('Disable', 'Normal', 'Status', 0, 100, 20, { target: 'normal', special: 'disable' }),
+  mv('Yawn', 'Normal', 'Status', 0, null, 10, { target: 'normal', special: 'yawn' }),
+  mv('Perish Song', 'Normal', 'Status', 0, null, 5, { target: 'field', special: 'perishSong' }),
   // Fire
   mv('Flamethrower', 'Fire', 'Special', 90, 100, 15, { effects: { status: { status: 'brn', chance: 10 } } }),
   mv('Fire Blast', 'Fire', 'Special', 110, 85, 5, { effects: { status: { status: 'brn', chance: 10 } } }),
@@ -170,6 +173,7 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Quash', 'Dark', 'Status', 0, 100, 15, { target: 'normal', special: 'quash' }),
   mv('Beat Up', 'Dark', 'Physical', 1, 100, 10, { special: 'beatUp' }),
   mv('Taunt', 'Dark', 'Status', 0, 100, 20, { target: 'normal', special: 'taunt' }),
+  mv('Torment', 'Dark', 'Status', 0, 100, 15, { target: 'normal', special: 'torment' }),
   // Steel
   mv('Iron Head', 'Steel', 'Physical', 80, 100, 15, { effects: { flinch: 30 } }),
   mv('Flash Cannon', 'Steel', 'Special', 80, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),
