@@ -19,7 +19,7 @@
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme='light']) {
     --bg: #14161a;
     --panel: #1d2026;
     --panel-2: #262a31;
@@ -35,6 +35,21 @@
   }
 }
 
+:root[data-theme='dark'] {
+  --bg: #14161a;
+  --panel: #1d2026;
+  --panel-2: #262a31;
+  --border: #353a43;
+  --text: #e8eaed;
+  --muted: #9aa1ab;
+  --accent: #5b8cff;
+  --p1: #6b94ff;
+  --p2: #ff7a5c;
+  --up: #5fd17c;
+  --down: #ff7b7b;
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 
 body {
@@ -48,7 +63,13 @@ h1, h2 { margin: 0; }
 h1 { font-size: 20px; }
 h2 { font-size: 16px; }
 
-.app { max-width: 1280px; margin: 0 auto; padding: 16px; }
+.app {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding-block: 16px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
 .app-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
 .muted { color: var(--muted); }
 
@@ -65,6 +86,7 @@ button {
   cursor: pointer;
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
+button:focus-visible, select:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
 button.big { padding: 10px 20px; font-size: 15px; }
@@ -222,15 +244,15 @@ details[open] .math-toggle { display: none; }
 .math tr.total td { border-top: 1px solid var(--border); padding-top: 3px; }
 
 .toast {
-  position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+  position: fixed; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); left: 50%; transform: translateX(-50%);
   background: var(--text); color: var(--bg); padding: 8px 14px; border-radius: 8px; font-size: 13px;
   max-width: calc(100% - 32px);
 }
 
 @media (max-width: 600px) {
-  .app { padding: 12px; }
   .library-list li { grid-template-columns: 1fr auto; }
   .lib-moves { grid-column: 1 / -1; white-space: normal; }
   .ev-cell input[type='range'] { display: none; }
-  .move-picker { grid-template-columns: 1fr; }
+  .move-picker { gap: 6px; }
+  .move-btn { padding: 6px 8px; min-width: 0; }
 }

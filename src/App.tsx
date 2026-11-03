@@ -95,6 +95,16 @@ function LibraryPanel({
   setNotice: (s: string) => void;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+
+  async function copyJson() {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(library, null, 2));
+      setNotice('Copied your builds as JSON. Paste them into a .json file to back them up.');
+    } catch {
+      setNotice('Copying is blocked here. Use Export JSON in the desktop version instead.');
+    }
+  }
 
   function exportJson() {
     const blob = new Blob([JSON.stringify(library, null, 2)], { type: 'application/json' });
@@ -127,7 +137,10 @@ function LibraryPanel({
       <header className="panel-head">
         <h2>My saved builds</h2>
         <div className="row">
-          <button onClick={exportJson} disabled={!library.length}>Export JSON</button>
+          {!import.meta.env.VITE_ARTIFACT && (
+            <button onClick={exportJson} disabled={!library.length}>Export JSON</button>
+          )}
+          <button onClick={copyJson} disabled={!library.length}>Copy JSON</button>
           <button onClick={() => fileInput.current?.click()}>Import JSON</button>
           <input
             ref={fileInput} type="file" accept="application/json,.json" hidden
@@ -154,14 +167,23 @@ function LibraryPanel({
               <span className="row">
                 <button className="small" onClick={() => onLoad(b, 0)}>To P1</button>
                 <button className="small" onClick={() => onLoad(b, 1)}>To P2</button>
-                <button
-                  className="small danger"
-                  onClick={() => {
-                    if (confirm(`Delete “${b.name}” from your library?`)) setLibrary((prev) => prev.filter((x) => x.id !== b.id));
-                  }}
-                >
-                  Delete
-                </button>
+                {pendingDelete === b.id ? (
+                  <>
+                    <button
+                      className="small danger"
+                      onClick={() => {
+                        setLibrary((prev) => prev.filter((x) => x.id !== b.id));
+                        setPendingDelete(null);
+                        setNotice(`Deleted “${b.name}”.`);
+                      }}
+                    >
+                      Confirm delete
+                    </button>
+                    <button className="small ghost" onClick={() => setPendingDelete(null)}>Cancel</button>
+                  </>
+                ) : (
+                  <button className="small danger" onClick={() => setPendingDelete(b.id)}>Delete</button>
+                )}
               </span>
             </li>
           ))}
