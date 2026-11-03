@@ -2,6 +2,7 @@ import { PRESET_BUILDS, blankBuild, newId } from '../data/presets';
 import { MAX_EV, MAX_EV_TOTAL, MAX_IV, calcAllStats, evTotal, natureMultiplier, validateBuild } from '../engine/stats';
 import { NATURES, NATURE_NAMES, STAT_KEYS, STAT_LABELS, TYPES } from '../engine/types';
 import type { Move, NatureName, PokemonBuild, StatKey, TypeName } from '../engine/types';
+import { AbilityItemFields } from './AbilityItemFields';
 import { MoveEditor } from './MoveEditor';
 import { NumField, TypeBadge } from './common';
 
@@ -11,9 +12,10 @@ function natureLabel(n: NatureName) {
 }
 
 export function BuildEditor({
-  label, build, onChange, library, onSave,
+  label, tabs, build, onChange, library, onSave,
 }: {
   label: string;
+  tabs?: React.ReactNode;
   build: PokemonBuild;
   onChange: (b: PokemonBuild) => void;
   library: PokemonBuild[];
@@ -54,6 +56,7 @@ export function BuildEditor({
           <button className="ghost" onClick={() => onChange(blankBuild())}>New</button>
         </div>
       </header>
+      {tabs}
 
       <div className="identity">
         <label className="grow">Name<input value={build.name} onChange={(e) => set('name', e.target.value)} /></label>
@@ -79,6 +82,7 @@ export function BuildEditor({
         <TypeBadge type={build.type1} />
         {build.type2 && build.type2 !== build.type1 && <TypeBadge type={build.type2} />}
       </div>
+      <AbilityItemFields build={build} onChange={onChange} idPrefix={`${label.replace(/\W/g, '')}-${build.id}`} />
 
       <table className="stat-table">
         <thead>

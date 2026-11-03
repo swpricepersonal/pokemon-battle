@@ -1,6 +1,6 @@
 import { MOVE_LIBRARY } from '../data/presets';
-import { BOOSTABLE_STATS, BOOST_LABELS, MAJOR_STATUSES, STATUS_LABELS, TYPES } from '../engine/types';
-import type { Boosts, MajorStatus, Move, MoveCategory, MoveEffects, TypeName } from '../engine/types';
+import { BOOSTABLE_STATS, BOOST_LABELS, MAJOR_STATUSES, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, TYPES } from '../engine/types';
+import type { Boosts, MajorStatus, Move, MoveCategory, MoveEffects, MoveSpecial, MoveTarget, TypeName } from '../engine/types';
 import { NumField, TypeBadge } from './common';
 
 const CATEGORIES: MoveCategory[] = ['Physical', 'Special', 'Status'];
@@ -81,6 +81,23 @@ export function MoveEditor({
               <input type="checkbox" checked={move.highCrit} onChange={(e) => set('highCrit', e.target.checked)} />
               High crit
             </label>
+            <label className="wide">Targets
+              <select value={move.target} onChange={(e) => set('target', e.target.value as MoveTarget)}>
+                {MOVE_TARGETS.map((t) => <option key={t} value={t}>{MOVE_TARGET_LABELS[t]}</option>)}
+              </select>
+            </label>
+            <label className="wide">Special behavior
+              <select
+                value={move.special ?? ''}
+                onChange={(e) => {
+                  const { special: _drop, ...rest } = move;
+                  onChange(e.target.value ? { ...rest, special: e.target.value as MoveSpecial } : rest);
+                }}
+              >
+                <option value="">None</option>
+                {MOVE_SPECIALS.map((sp) => <option key={sp} value={sp}>{MOVE_SPECIAL_LABELS[sp]}</option>)}
+              </select>
+            </label>
           </div>
           <EffectsEditor effects={move.effects} isStatus={move.category === 'Status'} onChange={setEffects} />
         </>
@@ -98,6 +115,7 @@ function summarize(e: MoveEffects): string {
   if (e.drain) parts.push(`drain ${e.drain}%`);
   if (e.recoil) parts.push(`recoil ${e.recoil}%`);
   if (e.heal) parts.push(`heal ${e.heal}%`);
+  if (e.flinch) parts.push(`${e.flinch}% flinch`);
   return parts.join(', ') || 'none';
 }
 
@@ -132,7 +150,7 @@ function EffectsEditor({
           )}
         </div>
         <BoostsEditor
-          label="Foe stats"
+          label="Target stats"
           value={effects.targetBoosts}
           defaultChance={isStatus ? 100 : 10}
           onChange={(targetBoosts) => update({ targetBoosts })}
@@ -148,10 +166,11 @@ function EffectsEditor({
             <>
               <label className="inline">Drain <NumField value={effects.drain ?? 0} min={0} max={100} onChange={(n) => update({ drain: n || undefined })} />%</label>
               <label className="inline">Recoil <NumField value={effects.recoil ?? 0} min={0} max={100} onChange={(n) => update({ recoil: n || undefined })} />%</label>
+              <label className="inline">Flinch <NumField value={effects.flinch ?? 0} min={0} max={100} onChange={(n) => update({ flinch: n || undefined })} />%</label>
             </>
           )}
           {isStatus && (
-            <label className="inline">Heal <NumField value={effects.heal ?? 0} min={0} max={100} onChange={(n) => update({ heal: n || undefined })} />% max HP</label>
+            <label className="inline">Heal target <NumField value={effects.heal ?? 0} min={0} max={100} onChange={(n) => update({ heal: n || undefined })} />% max HP</label>
           )}
         </div>
       </div>

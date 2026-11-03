@@ -43,9 +43,52 @@ export interface MoveEffects {
   drain?: number;
   /** User takes this % of damage dealt (e.g. Double-Edge = 33). */
   recoil?: number;
-  /** Heal this % of the user's max HP (e.g. Recover = 50). */
+  /** Status moves: heal each target by this % of its max HP (Recover = 50 on self, Heal Pulse = 50 on a target). */
   heal?: number;
+  /** Chance (%) to make the target flinch if it hasn't moved yet this turn. */
+  flinch?: number;
 }
+
+/** Who a move hits. In singles, every foe-targeting option means "the foe". */
+export const MOVE_TARGETS = ['normal', 'self', 'ally', 'selfAndAlly', 'adjacentFoes', 'allAdjacent', 'allySide', 'field'] as const;
+export type MoveTarget = (typeof MOVE_TARGETS)[number];
+
+export const MOVE_TARGET_LABELS: Record<MoveTarget, string> = {
+  normal: 'One Pokémon (chosen)',
+  self: 'User',
+  ally: 'Ally',
+  selfAndAlly: 'User and ally',
+  adjacentFoes: 'Both foes (spread)',
+  allAdjacent: 'Everyone else (spread)',
+  allySide: "User's side",
+  field: 'Whole field',
+};
+
+/** Moves with behavior that doesn't fit the generic effect fields. */
+export const MOVE_SPECIALS = [
+  'protect', 'wideGuard', 'quickGuard', 'followMe', 'ragePowder', 'spotlight', 'helpingHand', 'fakeOut',
+  'allySwitch', 'afterYou', 'quash', 'pollenPuff', 'tailwind', 'trickRoom', 'reflect', 'lightScreen',
+] as const;
+export type MoveSpecial = (typeof MOVE_SPECIALS)[number];
+
+export const MOVE_SPECIAL_LABELS: Record<MoveSpecial, string> = {
+  protect: 'Protect (block moves this turn)',
+  wideGuard: 'Wide Guard (block spread moves)',
+  quickGuard: 'Quick Guard (block priority moves)',
+  followMe: 'Follow Me (draw foes’ attacks)',
+  ragePowder: 'Rage Powder (draw foes’ attacks)',
+  spotlight: 'Spotlight (target draws attacks)',
+  helpingHand: 'Helping Hand (ally ×1.5 power)',
+  fakeOut: 'Fake Out (first turn only)',
+  allySwitch: 'Ally Switch (swap positions)',
+  afterYou: 'After You (target moves next)',
+  quash: 'Quash (target moves last)',
+  pollenPuff: 'Pollen Puff (heals an ally instead)',
+  tailwind: 'Tailwind (side Speed ×2, 4 turns)',
+  trickRoom: 'Trick Room (slower moves first, 5 turns)',
+  reflect: 'Reflect (physical damage reduced, 5 turns)',
+  lightScreen: 'Light Screen (special damage reduced, 5 turns)',
+};
 
 export interface Move {
   name: string;
@@ -58,7 +101,42 @@ export interface Move {
   priority: number;
   /** Raises the critical-hit stage by 1 (e.g. Slash, Stone Edge). */
   highCrit: boolean;
+  target: MoveTarget;
+  special?: MoveSpecial;
   effects: MoveEffects;
+}
+
+export type Side = 0 | 1;
+export type Format = 'singles' | 'doubles';
+
+/** Value used in PokemonBuild.ability to select the user-defined ability. */
+export const CUSTOM_ABILITY = 'Custom';
+
+/** A user-defined ability made from generic effects. Multipliers of 1 mean "no change". */
+export interface CustomAbility {
+  name: string;
+  /** Multiply the user's stats in battle (e.g. atk 2 for Huge Power). */
+  statMultipliers: Partial<Record<Exclude<StatKey, 'hp'>, number>>;
+  /** Power multiplier for the user's moves of one type. */
+  boostType: TypeName | null;
+  boostMultiplier: number;
+  /** Immune to one type; optionally heal 25% or raise a stat when hit by it. */
+  immuneType: TypeName | null;
+  onImmune: 'none' | 'heal' | 'boost';
+  immuneBoost: BoostableStat;
+  /** Damage taken from one type is multiplied (e.g. 0.5). */
+  resistType: TypeName | null;
+  resistMultiplier: number;
+  /** STAB multiplier (1.5 normally, 2 for Adaptability). */
+  stabMultiplier: number;
+  /** Multiplier on super-effective damage taken (Filter = 0.75). */
+  superEffectiveTaken: number;
+  critImmune: boolean;
+  statusImmune: MajorStatus[];
+  /** Applied to each foe when the battle starts (Intimidate = atk -1). */
+  onStartFoeBoosts: Partial<Boosts>;
+  /** Applied to the user at the end of each turn (Speed Boost = spe +1). */
+  endOfTurnBoosts: Partial<Boosts>;
 }
 
 export interface PokemonBuild {
@@ -68,6 +146,11 @@ export interface PokemonBuild {
   type1: TypeName;
   type2: TypeName | null;
   nature: NatureName;
+  /** Preset ability name, CUSTOM_ABILITY, or '' for none. */
+  ability: string;
+  customAbility?: CustomAbility;
+  /** Held item name, or '' for none. */
+  item: string;
   baseStats: StatTable;
   ivs: StatTable;
   evs: StatTable;
@@ -84,8 +167,23 @@ export const NATURES = {
 export type NatureName = keyof typeof NATURES;
 export const NATURE_NAMES = Object.keys(NATURES) as NatureName[];
 
+/** Per-turn flags, reset at the start of every turn. */
+export interface TurnVolatiles {
+  moved: boolean;
+  protected: boolean;
+  flinched: boolean;
+  helpingHand: boolean;
+  /** Set by Follow Me / Spotlight ('followMe') or Rage Powder ('powder', ignored by Grass types). */
+  centerOfAttention: 'followMe' | 'powder' | null;
+}
+
 /** A Pokémon's live state during a battle. */
 export interface BattlePokemon {
+  /** Stable id for this battle, e.g. "p1a". */
+  uid: string;
+  /** Display name (made unique within the battle). */
+  name: string;
+  side: Side;
   build: PokemonBuild;
   stats: StatTable;
   currentHp: number;
@@ -97,4 +195,17 @@ export interface BattlePokemon {
   boosts: Boosts;
   /** Remaining PP for each move slot. */
   pp: number[];
+  /** Current held item ('' once consumed). */
+  item: string;
+  /** Move slot a Choice item has locked in, if any. */
+  choiceLock: number | null;
+  /** Consecutive successful Protect-family uses. */
+  protectStreak: number;
+  /** Turns completed on the field (Fake Out needs 0). */
+  turnsActive: number;
+  /** Flash Fire has been activated. */
+  flashFire: boolean;
+  /** The faint message has been logged. */
+  faintLogged: boolean;
+  vol: TurnVolatiles;
 }

@@ -1,9 +1,14 @@
-import { blankBuild } from './data/presets';
-import { MAJOR_STATUSES, NATURE_NAMES, STAT_KEYS, TYPES } from './engine/types';
-import type { Move, PokemonBuild } from './engine/types';
+import { ABILITIES, blankCustomAbility } from './engine/abilities';
+import { ITEMS } from './engine/items';
+import { PRESET_BUILDS, blankBuild, defaultMoveTarget, newId } from './data/presets';
+import { BOOSTABLE_STATS, CUSTOM_ABILITY, MAJOR_STATUSES, MOVE_SPECIALS, MOVE_TARGETS, NATURE_NAMES, STAT_KEYS, TYPES } from './engine/types';
+import type { Boosts, CustomAbility, Format, Move, PokemonBuild } from './engine/types';
 
 const LIBRARY_KEY = 'battle-sim:library';
 const SIDES_KEY = 'battle-sim:sides';
+const TEAMS_KEY = 'battle-sim:teams';
+
+export type Teams = [PokemonBuild[], PokemonBuild[]];
 
 function read<T>(key: string): T | null {
   try {
@@ -31,16 +36,41 @@ export function saveLibrary(builds: PokemonBuild[]) {
   write(LIBRARY_KEY, builds);
 }
 
-export function loadSides(): [PokemonBuild, PokemonBuild] | null {
-  const raw = read<unknown[]>(SIDES_KEY);
-  if (!Array.isArray(raw) || raw.length !== 2) return null;
-  const a = normalizeBuild(raw[0]);
-  const b = normalizeBuild(raw[1]);
-  return a && b ? [a, b] : null;
+function presetCopy(i: number): PokemonBuild {
+  return { ...structuredClone(PRESET_BUILDS[i % PRESET_BUILDS.length]), id: newId() };
 }
 
-export function saveSides(sides: [PokemonBuild, PokemonBuild]) {
-  write(SIDES_KEY, sides);
+export function defaultTeams(): Teams {
+  return [[presetCopy(0), presetCopy(2)], [presetCopy(3), presetCopy(4)]];
+}
+
+/** Each team always holds exactly two builds (singles uses the first). */
+function fillTeam(team: PokemonBuild[], fallback: number): PokemonBuild[] {
+  const out = team.slice(0, 2);
+  while (out.length < 2) out.push(presetCopy(fallback + out.length));
+  return out;
+}
+
+export function loadTeams(): { teams: Teams; format: Format } | null {
+  const saved = read<{ teams?: unknown[]; format?: unknown }>(TEAMS_KEY);
+  if (saved && Array.isArray(saved.teams) && saved.teams.length === 2) {
+    const teams = saved.teams.map((t, i) =>
+      fillTeam(Array.isArray(t) ? t.flatMap((b) => normalizeBuild(b) ?? []) : [], i * 2),
+    ) as Teams;
+    return { teams, format: saved.format === 'doubles' ? 'doubles' : 'singles' };
+  }
+  // Older versions saved just the two singles builds.
+  const old = read<unknown[]>(SIDES_KEY);
+  if (Array.isArray(old) && old.length === 2) {
+    const a = normalizeBuild(old[0]);
+    const b = normalizeBuild(old[1]);
+    if (a && b) return { teams: [fillTeam([a], 2), fillTeam([b], 4)], format: 'singles' };
+  }
+  return null;
+}
+
+export function saveTeams(teams: Teams, format: Format) {
+  write(TEAMS_KEY, { teams, format });
 }
 
 function num(v: unknown, fallback: number, min: number, max: number): number {
@@ -52,15 +82,55 @@ function oneOf<T extends string>(v: unknown, options: readonly T[], fallback: T)
   return options.includes(v as T) ? (v as T) : fallback;
 }
 
+function boosts(v: unknown): Partial<Boosts> {
+  const o = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>;
+  const out: Partial<Boosts> = {};
+  for (const k of BOOSTABLE_STATS) {
+    const n = num(o[k], 0, -6, 6);
+    if (n) out[k] = n;
+  }
+  return out;
+}
+
+function normalizeCustomAbility(raw: unknown): CustomAbility {
+  const base = blankCustomAbility();
+  if (!raw || typeof raw !== 'object') return base;
+  const c = raw as Record<string, unknown>;
+  const mult = (v: unknown, fallback: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(10, v)) : fallback);
+  const sm = (c.statMultipliers && typeof c.statMultipliers === 'object' ? c.statMultipliers : {}) as Record<string, unknown>;
+  const typeOrNull = (v: unknown) => (TYPES.includes(v as never) ? (v as CustomAbility['boostType']) : null);
+  return {
+    name: typeof c.name === 'string' ? c.name : base.name,
+    statMultipliers: Object.fromEntries((['atk', 'def', 'spa', 'spd', 'spe'] as const).flatMap((k) => (sm[k] !== undefined ? [[k, mult(sm[k], 1)]] : []))),
+    boostType: typeOrNull(c.boostType),
+    boostMultiplier: mult(c.boostMultiplier, base.boostMultiplier),
+    immuneType: typeOrNull(c.immuneType),
+    onImmune: oneOf(c.onImmune, ['none', 'heal', 'boost'] as const, 'none'),
+    immuneBoost: oneOf(c.immuneBoost, BOOSTABLE_STATS, 'atk'),
+    resistType: typeOrNull(c.resistType),
+    resistMultiplier: mult(c.resistMultiplier, base.resistMultiplier),
+    stabMultiplier: mult(c.stabMultiplier, base.stabMultiplier),
+    superEffectiveTaken: mult(c.superEffectiveTaken, base.superEffectiveTaken),
+    critImmune: c.critImmune === true,
+    statusImmune: Array.isArray(c.statusImmune) ? c.statusImmune.filter((x) => MAJOR_STATUSES.includes(x)) : [],
+    onStartFoeBoosts: boosts(c.onStartFoeBoosts),
+    endOfTurnBoosts: boosts(c.endOfTurnBoosts),
+  };
+}
+
 function normalizeMove(raw: unknown): Move | null {
   if (!raw || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
   const effects = (m.effects && typeof m.effects === 'object' ? m.effects : {}) as Move['effects'];
   if (effects.status && !MAJOR_STATUSES.includes(effects.status.status)) delete effects.status;
+  const category = oneOf(m.category, ['Physical', 'Special', 'Status'] as const, 'Physical');
+  const special = MOVE_SPECIALS.includes(m.special as never) ? (m.special as Move['special']) : undefined;
   return {
+    target: oneOf(m.target, MOVE_TARGETS, defaultMoveTarget(category, effects)),
+    ...(special ? { special } : {}),
     name: typeof m.name === 'string' ? m.name : 'Move',
     type: oneOf(m.type, TYPES, 'Normal'),
-    category: oneOf(m.category, ['Physical', 'Special', 'Status'] as const, 'Physical'),
+    category,
     power: num(m.power, 0, 0, 999),
     accuracy: m.accuracy === null ? null : num(m.accuracy, 100, 1, 100),
     pp: num(m.pp, 10, 1, 64),
@@ -88,6 +158,9 @@ export function normalizeBuild(raw: unknown): PokemonBuild | null {
     type1: oneOf(b.type1, TYPES, 'Normal'),
     type2: TYPES.includes(b.type2 as never) ? (b.type2 as PokemonBuild['type2']) : null,
     nature: oneOf(b.nature, NATURE_NAMES, 'Hardy'),
+    ability: b.ability === CUSTOM_ABILITY || (typeof b.ability === 'string' && b.ability in ABILITIES) ? (b.ability as string) : '',
+    ...(b.ability === CUSTOM_ABILITY || b.customAbility ? { customAbility: normalizeCustomAbility(b.customAbility) } : {}),
+    item: typeof b.item === 'string' && b.item in ITEMS ? b.item : '',
     baseStats: table(b.baseStats, base.baseStats, 1, 255),
     ivs: table(b.ivs, base.ivs, 0, 31),
     evs: table(b.evs, base.evs, 0, 252),

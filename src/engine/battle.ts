@@ -1,13 +1,18 @@
-import { CRIT_CHANCES, calcDamage, typesOf } from './damage';
+import { abilityName, defenderAbility, getAbility, hasSecondary } from './abilities';
+import { CRIT_CHANCES, calcDamage, typeEffectiveness, typesOf } from './damage';
 import type { DamageBreakdown } from './damage';
+import { getItem } from './items';
+import { applyMod, chainMods } from './modifiers';
 import { accuracyStageMultiplier, calcAllStats, clampStage, stageMultiplier } from './stats';
-import { effectiveness } from './typeChart';
 import { BOOST_LABELS } from './types';
-import type { BattlePokemon, BoostableStat, Boosts, MajorStatus, Move, PokemonBuild } from './types';
+import type {
+  BattlePokemon, BoostableStat, Boosts, Format, MajorStatus, Move, PokemonBuild, Side, TurnVolatiles,
+} from './types';
+import type { ImmunityResult } from './abilities';
 
-export type Side = 0 | 1;
+export type { Side } from './types';
 
-export type LogKind = 'turn' | 'order' | 'move' | 'info' | 'damage' | 'heal' | 'status' | 'boost' | 'faint' | 'result';
+export type LogKind = 'turn' | 'order' | 'move' | 'info' | 'damage' | 'heal' | 'status' | 'boost' | 'faint' | 'result' | 'field';
 
 export interface LogEntry {
   turn: number;
@@ -18,21 +23,47 @@ export interface LogEntry {
   breakdown?: DamageBreakdown;
 }
 
+export interface SideState {
+  /** Active Pokémon by field position (index = slot). */
+  mons: BattlePokemon[];
+  tailwind: number;
+  reflect: number;
+  lightScreen: number;
+  wideGuard: boolean;
+  quickGuard: boolean;
+}
+
 export interface BattleState {
-  mons: [BattlePokemon, BattlePokemon];
-  names: [string, string];
+  format: Format;
+  sides: [SideState, SideState];
+  trickRoom: number;
   turn: number;
   winner: Side | 'draw' | null;
   log: LogEntry[];
 }
 
-/** A move slot index (0–3), or STRUGGLE_INDEX when every move is out of PP. */
+/** A move slot index (0–3), or STRUGGLE_INDEX when every usable move is out of PP. */
 export type MoveChoice = number;
 export const STRUGGLE_INDEX = -1;
 
+/** A field position. */
+export interface TargetRef {
+  side: Side;
+  slot: number;
+}
+
+export interface Action {
+  move: MoveChoice;
+  /** Required for single-target moves in doubles. */
+  target?: TargetRef;
+}
+
+/** Each active Pokémon's action for the turn, keyed by uid. */
+export type TurnChoices = Record<string, Action>;
+
 export const STRUGGLE: Move = {
   name: 'Struggle', type: 'Normal', category: 'Physical', power: 50, accuracy: null,
-  pp: 1, priority: 0, highCrit: false, effects: {},
+  pp: 1, priority: 0, highCrit: false, target: 'normal', effects: {},
 };
 
 export interface Rng {
@@ -58,9 +89,16 @@ export function seededRng(seed: number): Rng {
 
 const ZERO_BOOSTS: Boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
 
-export function createBattlePokemon(build: PokemonBuild): BattlePokemon {
+function freshVolatiles(): TurnVolatiles {
+  return { moved: false, protected: false, flinched: false, helpingHand: false, centerOfAttention: null };
+}
+
+export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 0, name?: string): BattlePokemon {
   const stats = calcAllStats(build);
   return {
+    uid: `p${side + 1}${'ab'[slot]}`,
+    name: name ?? (build.name.trim() || `Pokémon ${side + 1}`),
+    side,
     build: structuredClone(build),
     stats,
     currentHp: stats.hp,
@@ -69,25 +107,81 @@ export function createBattlePokemon(build: PokemonBuild): BattlePokemon {
     toxicCounter: 0,
     boosts: { ...ZERO_BOOSTS },
     pp: build.moves.map((m) => (m ? m.pp : 0)),
+    item: build.item ?? '',
+    choiceLock: null,
+    protectStreak: 0,
+    turnsActive: 0,
+    flashFire: false,
+    faintLogged: false,
+    vol: freshVolatiles(),
   };
 }
 
-export function createBattle(a: PokemonBuild, b: PokemonBuild): BattleState {
-  const rawA = a.name.trim() || 'Pokémon 1';
-  const rawB = b.name.trim() || 'Pokémon 2';
-  const names: [string, string] = rawA === rawB ? [`${rawA} (P1)`, `${rawB} (P2)`] : [rawA, rawB];
-  return {
-    mons: [createBattlePokemon(a), createBattlePokemon(b)],
-    names,
-    turn: 0,
-    winner: null,
-    log: [{ turn: 0, kind: 'info', text: `${names[0]} vs. ${names[1]}: battle start!` }],
+export const activeCount = (format: Format) => (format === 'doubles' ? 2 : 1);
+
+/** Create a battle from each side's team (the first 1 or 2 builds are used). */
+export function createBattle(
+  teams: [PokemonBuild[], PokemonBuild[]],
+  format: Format = 'singles',
+  rng: Rng = mathRng,
+): BattleState {
+  const n = activeCount(format);
+  const picked = teams.map((t) => t.slice(0, n)) as [PokemonBuild[], PokemonBuild[]];
+  const raw = picked.flatMap((t, side) => t.map((b, slot) => ({ side, slot, name: b.name.trim() || `Pokémon ${side + 1}${'AB'[slot]}` })));
+  const counts = new Map<string, number>();
+  for (const r of raw) counts.set(r.name, (counts.get(r.name) ?? 0) + 1);
+  const display = (side: number, slot: number) => {
+    const r = raw.find((x) => x.side === side && x.slot === slot)!;
+    if (counts.get(r.name)! === 1) return r.name;
+    const sameSide = raw.filter((x) => x.side === side && x.name === r.name).length > 1;
+    return `${r.name} (P${side + 1}${sameSide ? 'AB'[slot] : ''})`;
   };
+  const sides = picked.map((team, side) => ({
+    mons: team.map((b, slot) => createBattlePokemon(b, side as Side, slot, display(side, slot))),
+    tailwind: 0, reflect: 0, lightScreen: 0, wideGuard: false, quickGuard: false,
+  })) as [SideState, SideState];
+  const state: BattleState = { format, sides, trickRoom: 0, turn: 0, winner: null, log: [] };
+  const teamName = (s: SideState) => s.mons.map((m) => m.name).join(' & ');
+  state.log.push({ turn: 0, kind: 'info', text: `${teamName(sides[0])} vs. ${teamName(sides[1])}: battle start!` });
+  new TurnRunner(state, rng).startOfBattle();
+  return state;
 }
 
-/** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none have PP. */
+export function allMons(state: BattleState): BattlePokemon[] {
+  return [...state.sides[0].mons, ...state.sides[1].mons];
+}
+
+export const isAlive = (m: BattlePokemon | null | undefined): m is BattlePokemon => !!m && m.currentHp > 0;
+
+export function findMon(state: BattleState, uid: string): BattlePokemon | undefined {
+  return allMons(state).find((m) => m.uid === uid);
+}
+
+export function slotOf(state: BattleState, mon: BattlePokemon): number {
+  return state.sides[mon.side].mons.indexOf(mon);
+}
+
+export function monAt(state: BattleState, ref: TargetRef): BattlePokemon | undefined {
+  return state.sides[ref.side]?.mons[ref.slot];
+}
+
+export function allyOf(state: BattleState, mon: BattlePokemon): BattlePokemon | null {
+  return state.sides[mon.side].mons.find((m) => m !== mon) ?? null;
+}
+
+export function foesOf(state: BattleState, mon: BattlePokemon): BattlePokemon[] {
+  return state.sides[mon.side === 0 ? 1 : 0].mons.filter(isAlive);
+}
+
+/** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
 export function availableChoices(mon: BattlePokemon): MoveChoice[] {
-  const choices = mon.build.moves.flatMap((m, i) => (m && mon.pp[i] > 0 ? [i] : []));
+  const item = getItem(mon);
+  const choices = mon.build.moves.flatMap((m, i) => {
+    if (!m || mon.pp[i] <= 0) return [];
+    if (mon.choiceLock !== null && mon.choiceLock !== i) return [];
+    if (item?.noStatusMoves && m.category === 'Status') return [];
+    return [i];
+  });
   return choices.length ? choices : [STRUGGLE_INDEX];
 }
 
@@ -98,37 +192,48 @@ export function getChoiceMove(mon: BattlePokemon, choice: MoveChoice): Move {
   return move;
 }
 
-/** Speed after stat stages and paralysis (0.5x). */
-export function effectiveSpeed(mon: BattlePokemon): number {
-  const spe = Math.floor(mon.stats.spe * stageMultiplier(mon.boosts.spe));
+/** Does the player pick a target for this move? */
+export function moveNeedsTarget(state: BattleState, move: Move): boolean {
+  return state.format === 'doubles' && move.target === 'normal';
+}
+
+/** Positions a single-target move can aim at (foes first). */
+export function validTargets(state: BattleState, mon: BattlePokemon): TargetRef[] {
+  const foeSide: Side = mon.side === 0 ? 1 : 0;
+  const refs: TargetRef[] = [];
+  state.sides[foeSide].mons.forEach((m, slot) => isAlive(m) && refs.push({ side: foeSide, slot }));
+  state.sides[mon.side].mons.forEach((m, slot) => m !== mon && isAlive(m) && refs.push({ side: mon.side, slot }));
+  return refs;
+}
+
+export function defaultTarget(state: BattleState, mon: BattlePokemon): TargetRef | undefined {
+  return validTargets(state, mon)[0];
+}
+
+/** Speed after stat stages, abilities, items, Tailwind and paralysis. */
+export function effectiveSpeed(state: BattleState, mon: BattlePokemon): number {
+  const base = Math.floor(mon.stats.spe * stageMultiplier(mon.boosts.spe));
+  const mods: number[] = [];
+  const ab = getAbility(mon);
+  if (ab?.speed) mods.push(ab.speed(mon));
+  const item = getItem(mon);
+  if (item?.speed) mods.push(item.speed);
+  if (state.sides[mon.side].tailwind > 0) mods.push(2);
+  const spe = applyMod(base, chainMods(mods));
   return mon.status === 'par' ? Math.floor(spe * 0.5) : spe;
 }
 
-export function determineOrder(
-  state: BattleState,
-  choices: [MoveChoice, MoveChoice],
-  rng: Rng,
-): { order: [Side, Side]; reason: string } {
-  const [m0, m1] = [getChoiceMove(state.mons[0], choices[0]), getChoiceMove(state.mons[1], choices[1])];
-  const [n0, n1] = state.names;
-  let first: Side;
-  let reason: string;
-  if (m0.priority !== m1.priority) {
-    first = m0.priority > m1.priority ? 0 : 1;
-    const p = first === 0 ? m0.priority : m1.priority;
-    reason = `${state.names[first]} moves first (priority ${p > 0 ? '+' : ''}${p}).`;
-  } else {
-    const s0 = effectiveSpeed(state.mons[0]);
-    const s1 = effectiveSpeed(state.mons[1]);
-    if (s0 !== s1) {
-      first = s0 > s1 ? 0 : 1;
-      reason = `${state.names[first]} is faster (Speed ${n0} ${s0} vs. ${n1} ${s1}).`;
-    } else {
-      first = rng.next() < 0.5 ? 0 : 1;
-      reason = `Speed tie at ${s0}! ${state.names[first]} won the coin flip.`;
-    }
-  }
-  return { order: first === 0 ? [0, 1] : [1, 0], reason };
+export function movePriority(mon: BattlePokemon, move: Move): number {
+  return move.priority + (getAbility(mon)?.priority?.(move) ?? 0);
+}
+
+interface QueueEntry {
+  mon: BattlePokemon;
+  action: Action;
+  move: Move;
+  priority: number;
+  tiebreak: number;
+  fixed?: 'first' | 'last';
 }
 
 const STATUS_IMMUNITY: Record<MajorStatus, string[]> = {
@@ -144,6 +249,9 @@ const STATUS_INFLICT_TEXT: Record<MajorStatus, string> = {
   frz: 'was frozen solid!',
 };
 
+const PROTECT_MOVES = new Set(['protect', 'wideGuard', 'quickGuard']);
+const SPREAD_TARGETS = new Set(['adjacentFoes', 'allAdjacent']);
+
 function chanceHit(chance: number, rng: Rng): boolean {
   return chance >= 100 || rng.next() * 100 < chance;
 }
@@ -153,260 +261,648 @@ function pct(n: number, max: number): string {
 }
 
 class TurnRunner {
+  queue: QueueEntry[] = [];
+
   constructor(private s: BattleState, private rng: Rng) {}
+
+  get doubles() {
+    return this.s.format === 'doubles';
+  }
 
   log(kind: LogKind, text: string, side?: Side, breakdown?: DamageBreakdown) {
     this.s.log.push({ turn: this.s.turn, kind, text, side, breakdown });
   }
 
-  name(side: Side) {
-    return this.s.names[side];
+  teamName(side: Side) {
+    return this.doubles ? `Player ${side + 1}'s team` : this.s.sides[side].mons[0].name;
   }
 
-  canInflict(mon: BattlePokemon, status: MajorStatus): boolean {
+  ally(mon: BattlePokemon) {
+    return allyOf(this.s, mon);
+  }
+
+  speedOrder(mons: BattlePokemon[]): BattlePokemon[] {
+    return [...mons].sort((a, b) => effectiveSpeed(this.s, b) - effectiveSpeed(this.s, a));
+  }
+
+  // ---------- Start of battle ----------
+
+  startOfBattle() {
+    for (const mon of this.speedOrder(allMons(this.s))) {
+      const ab = getAbility(mon);
+      if (!ab?.onStartFoeBoosts) continue;
+      this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+      for (const foe of foesOf(this.s, mon)) {
+        const fAb = defenderAbility(foe, mon);
+        if (fAb?.innerFocus) {
+          this.log('info', `${foe.name}'s ${abilityName(foe)} kept it from being affected!`, foe.side);
+          continue;
+        }
+        this.applyBoosts(foe, ab.onStartFoeBoosts, mon);
+      }
+    }
+  }
+
+  // ---------- Status, stats, HP ----------
+
+  canInflict(mon: BattlePokemon, status: MajorStatus, source: BattlePokemon | null): boolean {
     if (mon.status !== null || mon.currentHp <= 0) return false;
-    return !typesOf(mon).some((t) => STATUS_IMMUNITY[status].includes(t));
+    if (typesOf(mon).some((t) => STATUS_IMMUNITY[status].includes(t))) return false;
+    const ab = source ? defenderAbility(mon, source) : getAbility(mon);
+    return !ab?.statusImmune?.includes(status);
   }
 
-  inflict(side: Side, status: MajorStatus) {
-    const mon = this.s.mons[side];
+  inflict(mon: BattlePokemon, status: MajorStatus) {
     mon.status = status;
     if (status === 'slp') mon.sleepTurns = 1 + Math.floor(this.rng.next() * 3);
     if (status === 'tox') mon.toxicCounter = 0;
-    this.log('status', `${this.name(side)} ${STATUS_INFLICT_TEXT[status]}`, side);
+    this.log('status', `${mon.name} ${STATUS_INFLICT_TEXT[status]}`, mon.side);
   }
 
-  applyBoosts(side: Side, boosts: Partial<Boosts>) {
-    const mon = this.s.mons[side];
-    for (const [key, delta] of Object.entries(boosts) as [BoostableStat, number][]) {
-      if (!delta) continue;
-      const before = mon.boosts[key];
-      const after = clampStage(before + delta);
-      const label = `${this.name(side)}'s ${BOOST_LABELS[key]}`;
-      if (after === before) {
-        this.log('boost', `${label} won't go any ${delta > 0 ? 'higher' : 'lower'}!`, side);
+  /** Apply stat-stage changes. `source` is the Pokémon causing them (null for self-inflicted). */
+  applyBoosts(target: BattlePokemon, boosts: Partial<Boosts>, source: BattlePokemon | null) {
+    if (target.currentHp <= 0) return;
+    const ab = source && source !== target ? defenderAbility(target, source) : getAbility(target);
+    const byFoe = !!source && source.side !== target.side;
+    let droppedByFoe = false;
+    for (const [key, raw] of Object.entries(boosts) as [BoostableStat, number][]) {
+      if (!raw) continue;
+      let delta = ab?.contrary ? -raw : raw;
+      if (ab?.simple) delta *= 2;
+      const label = `${target.name}'s ${BOOST_LABELS[key]}`;
+      if (delta < 0 && byFoe && ab?.clearBody) {
+        this.log('boost', `${target.name}'s ${abilityName(target)} prevents its stats from being lowered!`, target.side);
         continue;
       }
-      mon.boosts[key] = after;
+      const before = target.boosts[key];
+      const after = clampStage(before + delta);
+      if (after === before) {
+        this.log('boost', `${label} won't go any ${delta > 0 ? 'higher' : 'lower'}!`, target.side);
+        continue;
+      }
+      target.boosts[key] = after;
       const change = after - before;
       const mag = Math.abs(change);
       const word = change > 0
         ? mag === 1 ? 'rose!' : mag === 2 ? 'rose sharply!' : 'rose drastically!'
         : mag === 1 ? 'fell!' : mag === 2 ? 'harshly fell!' : 'severely fell!';
-      this.log('boost', `${label} ${word} (${after > 0 ? '+' : ''}${after})`, side);
+      this.log('boost', `${label} ${word} (${after > 0 ? '+' : ''}${after})`, target.side);
+      if (change < 0 && byFoe) droppedByFoe = true;
+    }
+    if (droppedByFoe && ab?.onStatDroppedByFoe) {
+      this.log('info', `${target.name}'s ${abilityName(target)}!`, target.side);
+      this.applyBoosts(target, ab.onStatDroppedByFoe, null);
     }
   }
 
-  heal(side: Side, amount: number, reason: string) {
-    const mon = this.s.mons[side];
+  heal(mon: BattlePokemon, amount: number, reason: string) {
     const healed = Math.min(amount, mon.stats.hp - mon.currentHp);
     if (healed <= 0) return;
     mon.currentHp += healed;
-    this.log('heal', `${this.name(side)} ${reason} (+${healed} HP).`, side);
+    this.log('heal', `${mon.name} ${reason} (+${healed} HP).`, mon.side);
   }
 
-  hurt(side: Side, amount: number, reason: string) {
-    const mon = this.s.mons[side];
+  hurt(mon: BattlePokemon, amount: number, reason: string) {
     const lost = Math.min(amount, mon.currentHp);
+    if (lost <= 0) return;
     mon.currentHp -= lost;
-    this.log('damage', `${this.name(side)} ${reason} (-${lost} HP, ${pct(lost, mon.stats.hp)}).`, side);
+    this.log('damage', `${mon.name} ${reason} (-${lost} HP, ${pct(lost, mon.stats.hp)}).`, mon.side);
+  }
+
+  // ---------- Turn order ----------
+
+  sortQueue() {
+    const tr = this.s.trickRoom > 0;
+    const speeds = new Map(this.queue.map((e) => [e, effectiveSpeed(this.s, e.mon)]));
+    const rest = this.queue.filter((e) => !e.fixed).sort((a, b) => {
+      if (a.priority !== b.priority) return b.priority - a.priority;
+      const sa = speeds.get(a)!;
+      const sb = speeds.get(b)!;
+      if (sa !== sb) return tr ? sa - sb : sb - sa;
+      return a.tiebreak - b.tiebreak;
+    });
+    this.queue = [
+      ...this.queue.filter((e) => e.fixed === 'first'),
+      ...rest,
+      ...this.queue.filter((e) => e.fixed === 'last'),
+    ];
+  }
+
+  buildQueue(choices: TurnChoices) {
+    this.queue = [];
+    for (const mon of allMons(this.s)) {
+      if (!isAlive(mon)) continue;
+      const allowed = availableChoices(mon);
+      let action = choices[mon.uid];
+      if (!action || !allowed.includes(action.move)) action = { move: allowed[0], target: action?.target };
+      const move = getChoiceMove(mon, action.move);
+      this.queue.push({ mon, action, move, priority: movePriority(mon, move), tiebreak: this.rng.next() });
+    }
+    this.sortQueue();
+  }
+
+  orderReason(): string {
+    const q = this.queue;
+    const tr = this.s.trickRoom > 0;
+    const spe = (m: BattlePokemon) => effectiveSpeed(this.s, m);
+    if (q.length === 2) {
+      const [a, b] = q;
+      if (a.priority !== b.priority) {
+        return `${a.mon.name} moves first (priority ${a.priority > 0 ? '+' : ''}${a.priority}).`;
+      }
+      const speeds = `Speed ${a.mon.name} ${spe(a.mon)} vs. ${b.mon.name} ${spe(b.mon)}`;
+      if (spe(a.mon) === spe(b.mon)) return `Speed tie at ${spe(a.mon)}! ${a.mon.name} won the coin flip.`;
+      return tr ? `${a.mon.name} is slower and moves first under Trick Room (${speeds}).` : `${a.mon.name} is faster (${speeds}).`;
+    }
+    const parts = q.map((e) => `${e.mon.name} (${e.priority !== 0 ? `priority ${e.priority > 0 ? '+' : ''}${e.priority}, ` : ''}Spe ${spe(e.mon)})`);
+    return `Turn order: ${parts.join(' → ')}${tr ? ' (Trick Room: slower first)' : ''}.`;
+  }
+
+  // ---------- Running a turn ----------
+
+  runTurn(choices: TurnChoices) {
+    for (const mon of allMons(this.s)) mon.vol = freshVolatiles();
+    for (const side of this.s.sides) {
+      side.wideGuard = false;
+      side.quickGuard = false;
+    }
+    this.buildQueue(choices);
+    this.log('order', this.orderReason(), this.queue[0]?.mon.side);
+    while (this.queue.length) {
+      const entry = this.queue.shift()!;
+      this.executeAction(entry);
+      if (this.checkFaints()) return;
+      this.sortQueue();
+    }
+    this.endOfTurn();
+    this.checkFaints();
   }
 
   /** Returns false if the Pokémon can't act this turn. */
-  preMoveCheck(side: Side): boolean {
-    const mon = this.s.mons[side];
-    const n = this.name(side);
+  preMoveCheck(mon: BattlePokemon): boolean {
     if (mon.status === 'slp') {
       if (mon.sleepTurns > 0) {
         mon.sleepTurns--;
-        this.log('status', `${n} is fast asleep.`, side);
+        this.log('status', `${mon.name} is fast asleep.`, mon.side);
         return false;
       }
       mon.status = null;
-      this.log('status', `${n} woke up!`, side);
+      this.log('status', `${mon.name} woke up!`, mon.side);
     }
     if (mon.status === 'frz') {
       if (this.rng.next() < 0.2) {
         mon.status = null;
-        this.log('status', `${n} thawed out!`, side);
+        this.log('status', `${mon.name} thawed out!`, mon.side);
       } else {
-        this.log('status', `${n} is frozen solid!`, side);
+        this.log('status', `${mon.name} is frozen solid!`, mon.side);
         return false;
       }
     }
     if (mon.status === 'par' && this.rng.next() < 0.25) {
-      this.log('status', `${n} is fully paralyzed! It can't move!`, side);
+      this.log('status', `${mon.name} is fully paralyzed! It can't move!`, mon.side);
       return false;
     }
     return true;
   }
 
-  executeMove(side: Side, choice: MoveChoice) {
-    const foe: Side = side === 0 ? 1 : 0;
-    const user = this.s.mons[side];
-    const target = this.s.mons[foe];
-    const move = getChoiceMove(user, choice);
-
-    if (!this.preMoveCheck(side)) return;
-
-    if (choice === STRUGGLE_INDEX) {
-      this.log('info', `${this.name(side)} has no moves left!`, side);
-    } else {
-      user.pp[choice] = Math.max(0, user.pp[choice] - 1);
-    }
-    this.log('move', `${this.name(side)} used ${move.name}!`, side);
-
-    const e = move.effects;
-    const affectsTarget = move.category !== 'Status' || !!e.status || !!e.targetBoosts;
-
-    if (affectsTarget && move.accuracy !== null) {
-      const stage = clampStage(user.boosts.accuracy - target.boosts.evasion);
-      const hitChance = move.accuracy * accuracyStageMultiplier(stage);
-      if (this.rng.next() * 100 >= hitChance) {
-        this.log('info', `${this.name(foe)} avoided the attack! (${Math.round(hitChance)}% to hit)`, side);
-        return;
-      }
-    }
-
-    if (move.category === 'Status') {
-      this.executeStatusMove(side, move);
-    } else {
-      this.executeDamagingMove(side, move, choice === STRUGGLE_INDEX);
-    }
+  fail() {
+    this.log('info', 'But it failed!');
   }
 
-  executeStatusMove(side: Side, move: Move) {
-    const foe: Side = side === 0 ? 1 : 0;
-    const user = this.s.mons[side];
-    const target = this.s.mons[foe];
-    const e = move.effects;
-    let acted = false;
+  executeAction(entry: QueueEntry) {
+    const { mon: user, move, action } = entry;
+    if (!isAlive(user)) return;
+    user.vol.moved = true;
 
-    if (e.status) {
-      if (effectiveness(move.type, typesOf(target)) === 0) {
-        this.log('info', `It doesn't affect ${this.name(foe)}...`, foe);
-        return;
-      }
-      if (!this.canInflict(target, e.status.status)) {
-        this.log('info', 'But it failed!');
-      } else if (chanceHit(e.status.chance, this.rng)) {
-        this.inflict(foe, e.status.status);
-      }
-      acted = true;
+    if (user.vol.flinched) {
+      this.log('status', `${user.name} flinched and couldn't move!`, user.side);
+      user.protectStreak = 0;
+      return;
     }
-    if (e.heal) {
-      if (user.currentHp >= user.stats.hp) this.log('info', `${this.name(side)}'s HP is full!`, side);
-      else this.heal(side, Math.floor((user.stats.hp * e.heal) / 100), 'restored HP');
-      acted = true;
-    }
-    if (e.targetBoosts && chanceHit(e.targetBoosts.chance, this.rng)) {
-      this.applyBoosts(foe, e.targetBoosts.boosts);
-      acted = true;
-    }
-    if (e.selfBoosts && chanceHit(e.selfBoosts.chance, this.rng)) {
-      this.applyBoosts(side, e.selfBoosts.boosts);
-      acted = true;
-    }
-    if (!acted) this.log('info', 'But nothing happened!');
-  }
-
-  executeDamagingMove(side: Side, move: Move, typeless: boolean) {
-    const foe: Side = side === 0 ? 1 : 0;
-    const user = this.s.mons[side];
-    const target = this.s.mons[foe];
-    const e = move.effects;
-
-    const eff = typeless ? 1 : effectiveness(move.type, typesOf(target));
-    if (eff === 0) {
-      this.log('info', `It doesn't affect ${this.name(foe)}...`, foe);
+    if (!this.preMoveCheck(user)) {
+      user.protectStreak = 0;
       return;
     }
 
-    const crit = this.rng.next() < CRIT_CHANCES[move.highCrit ? 1 : 0];
-    const roll = 85 + Math.floor(this.rng.next() * 16);
-    const bd = calcDamage(user, target, move, { crit, roll, typeless });
-    const dealt = Math.min(bd.damage, target.currentHp);
-    target.currentHp -= dealt;
-
-    if (crit) this.log('info', 'A critical hit!', side);
-    if (eff > 1) this.log('info', "It's super effective!", side);
-    if (eff < 1) this.log('info', "It's not very effective...", side);
-    this.log('damage', `${this.name(foe)} lost ${dealt} HP (${pct(dealt, target.stats.hp)}).`, foe, bd);
-
-    if (target.currentHp > 0 && target.status === 'frz' && move.type === 'Fire') {
-      target.status = null;
-      this.log('status', `${this.name(foe)} thawed out!`, foe);
-    }
-
-    if (e.drain && dealt > 0) {
-      this.heal(side, Math.max(1, Math.floor((dealt * e.drain) / 100)), 'drained energy');
-    }
-    if (typeless) {
-      this.hurt(side, Math.max(1, Math.floor(user.stats.hp / 4)), 'is damaged by recoil');
-    } else if (e.recoil && dealt > 0) {
-      this.hurt(side, Math.max(1, Math.floor((dealt * e.recoil) / 100)), 'is damaged by recoil');
-    }
-
-    if (target.currentHp > 0) {
-      if (e.status && this.canInflict(target, e.status.status) && chanceHit(e.status.chance, this.rng)) {
-        this.inflict(foe, e.status.status);
-      }
-      if (e.targetBoosts && chanceHit(e.targetBoosts.chance, this.rng)) {
-        this.applyBoosts(foe, e.targetBoosts.boosts);
-      }
-    }
-    if (user.currentHp > 0 && e.selfBoosts && chanceHit(e.selfBoosts.chance, this.rng)) {
-      this.applyBoosts(side, e.selfBoosts.boosts);
-    }
-  }
-
-  endOfTurn(order: [Side, Side]) {
-    for (const side of order) {
-      const mon = this.s.mons[side];
-      if (mon.currentHp <= 0) continue;
-      const max = mon.stats.hp;
-      if (mon.status === 'brn') this.hurt(side, Math.max(1, Math.floor(max / 16)), 'was hurt by its burn');
-      if (mon.status === 'psn') this.hurt(side, Math.max(1, Math.floor(max / 8)), 'was hurt by poison');
-      if (mon.status === 'tox') {
-        mon.toxicCounter = Math.min(15, mon.toxicCounter + 1);
-        this.hurt(side, Math.max(1, Math.floor((max * mon.toxicCounter) / 16)), 'was hurt by poison');
-      }
-    }
-  }
-
-  /** Logs faints and sets the winner. Returns true if the battle is over. */
-  checkFaints(): boolean {
-    const fainted = ([0, 1] as Side[]).filter((side) => this.s.mons[side].currentHp <= 0);
-    if (!fainted.length) return false;
-    for (const side of fainted) this.log('faint', `${this.name(side)} fainted!`, side);
-    if (fainted.length === 2) {
-      this.s.winner = 'draw';
-      this.log('result', 'Both Pokémon fainted. The battle is a draw!');
+    const struggle = action.move === STRUGGLE_INDEX;
+    if (struggle) {
+      this.log('info', `${user.name} has no moves left!`, user.side);
     } else {
-      const winner: Side = fainted[0] === 0 ? 1 : 0;
+      user.pp[action.move] = Math.max(0, user.pp[action.move] - 1);
+      if (getItem(user)?.choice && user.choiceLock === null) user.choiceLock = action.move;
+    }
+    this.log('move', `${user.name} used ${move.name}!`, user.side);
+
+    const sp = move.special;
+    if (!sp || !PROTECT_MOVES.has(sp)) user.protectStreak = 0;
+    const side = this.s.sides[user.side];
+    const ally = this.ally(user);
+
+    switch (sp) {
+      case 'protect':
+      case 'wideGuard':
+      case 'quickGuard':
+        return this.doProtect(user, sp);
+      case 'followMe':
+      case 'ragePowder':
+        if (!this.doubles) return this.fail();
+        user.vol.centerOfAttention = sp === 'ragePowder' ? 'powder' : 'followMe';
+        return this.log('info', `${user.name} became the center of attention!`, user.side);
+      case 'helpingHand':
+        if (!isAlive(ally) || ally.vol.moved) return this.fail();
+        ally.vol.helpingHand = true;
+        return this.log('info', `${user.name} is ready to help ${ally.name}!`, user.side);
+      case 'allySwitch': {
+        if (!isAlive(ally)) return this.fail();
+        const [a, b] = side.mons;
+        side.mons[0] = b;
+        side.mons[1] = a;
+        return this.log('info', `${user.name} and ${ally.name} switched places!`, user.side);
+      }
+      case 'tailwind':
+        if (side.tailwind > 0) return this.fail();
+        side.tailwind = 4;
+        return this.log('field', `The Tailwind blew from behind ${this.teamName(user.side)}!`, user.side);
+      case 'trickRoom':
+        if (this.s.trickRoom > 0) {
+          this.s.trickRoom = 0;
+          return this.log('field', 'The twisted dimensions returned to normal!');
+        }
+        this.s.trickRoom = 5;
+        return this.log('field', `${user.name} twisted the dimensions!`, user.side);
+      case 'reflect':
+      case 'lightScreen': {
+        const key = sp;
+        if (side[key] > 0) return this.fail();
+        side[key] = getItem(user)?.lightClay ? 8 : 5;
+        return this.log('field', `${sp === 'reflect' ? 'Reflect' : 'Light Screen'} made ${this.teamName(user.side)} stronger against ${sp === 'reflect' ? 'physical' : 'special'} moves!`, user.side);
+      }
+      case 'fakeOut':
+        if (user.turnsActive > 0) return this.fail();
+        break;
+    }
+
+    const targets = this.resolveTargets(user, move, action);
+    if (!targets.length) {
+      this.log('info', 'But there was no target...');
+      return;
+    }
+
+    if (sp === 'spotlight' || sp === 'afterYou' || sp === 'quash') {
+      const t = targets[0];
+      if (t === user) return this.fail();
+      if (sp === 'spotlight') {
+        t.vol.centerOfAttention = 'followMe';
+        return this.log('info', `${t.name} became the center of attention!`, t.side);
+      }
+      const idx = this.queue.findIndex((e) => e.mon === t);
+      if (idx < 0) return this.fail();
+      const [e] = this.queue.splice(idx, 1);
+      if (sp === 'afterYou') {
+        e.fixed = 'first';
+        this.queue.unshift(e);
+        return this.log('info', `${t.name} took the kind offer!`, t.side);
+      }
+      e.fixed = 'last';
+      this.queue.push(e);
+      return this.log('info', `${t.name}'s move was postponed!`, t.side);
+    }
+
+    const damaging = move.category !== 'Status';
+    const spread = damaging && SPREAD_TARGETS.has(move.target) && targets.length > 1;
+    const aAb = getAbility(user);
+    const sheerForce = !!aAb?.sheerForce && hasSecondary(move);
+    let totalDealt = 0;
+    let anyHit = false;
+
+    for (const t of targets) {
+      if (!isAlive(t)) continue;
+      if (t !== user) {
+        if (this.blocked(t, move, entry)) continue;
+        if (!this.accuracyHit(user, t, move)) {
+          this.log('info', `${t.name} avoided the attack!`, t.side);
+          continue;
+        }
+      }
+      if (sp === 'pollenPuff' && t.side === user.side) {
+        anyHit = true;
+        if (t.currentHp >= t.stats.hp) this.log('info', `${t.name}'s HP is full!`, t.side);
+        else this.heal(t, Math.floor(t.stats.hp / 2), 'had its HP restored');
+        continue;
+      }
+      if (damaging) {
+        const dealt = this.hit(user, t, move, struggle, spread, sheerForce);
+        if (dealt !== null) {
+          anyHit = true;
+          totalDealt += dealt;
+        }
+      } else if (this.statusEffect(user, t, move)) {
+        anyHit = true;
+      }
+    }
+
+    const e = move.effects;
+    if (damaging && totalDealt > 0 && isAlive(user)) {
+      if (e.drain) this.heal(user, Math.max(1, Math.floor((totalDealt * e.drain) / 100)), 'drained energy');
+      if (struggle) {
+        this.hurt(user, Math.max(1, Math.round(user.stats.hp / 4)), 'is damaged by recoil');
+      } else if (e.recoil && !aAb?.rockHead && !aAb?.magicGuard) {
+        this.hurt(user, Math.max(1, Math.floor((totalDealt * e.recoil) / 100)), 'is damaged by recoil');
+      }
+      if (getItem(user)?.lifeOrb && !aAb?.magicGuard && !sheerForce) {
+        this.hurt(user, Math.max(1, Math.floor(user.stats.hp / 10)), 'lost some of its HP to its Life Orb');
+      }
+    }
+    if (anyHit && isAlive(user) && e.selfBoosts) {
+      const chance = e.selfBoosts.chance * (aAb?.sereneGrace ? 2 : 1);
+      if (chanceHit(chance, this.rng)) this.applyBoosts(user, e.selfBoosts.boosts, null);
+    }
+  }
+
+  doProtect(user: BattlePokemon, kind: 'protect' | 'wideGuard' | 'quickGuard') {
+    const last = this.queue.length === 0;
+    const chance = 1 / 3 ** user.protectStreak;
+    if (last || (user.protectStreak > 0 && this.rng.next() >= chance)) {
+      user.protectStreak = 0;
+      return this.fail();
+    }
+    user.protectStreak++;
+    if (kind === 'protect') {
+      user.vol.protected = true;
+      return this.log('info', `${user.name} protected itself!`, user.side);
+    }
+    this.s.sides[user.side][kind] = true;
+    return this.log('field', `${kind === 'wideGuard' ? 'Wide Guard' : 'Quick Guard'} protected ${this.teamName(user.side)}!`, user.side);
+  }
+
+  resolveTargets(user: BattlePokemon, move: Move, action: Action): BattlePokemon[] {
+    const ally = this.ally(user);
+    const foes = foesOf(this.s, user);
+    switch (move.target) {
+      case 'self':
+      case 'allySide':
+      case 'field':
+        return [user];
+      case 'ally':
+        return isAlive(ally) ? [ally] : [];
+      case 'selfAndAlly':
+        return isAlive(ally) ? [user, ally] : [user];
+      case 'adjacentFoes':
+        return foes;
+      case 'allAdjacent':
+        return isAlive(ally) ? [...foes, ally] : foes;
+      case 'normal': {
+        let t: BattlePokemon | undefined = action.target && this.doubles ? monAt(this.s, action.target) : foes[0];
+        if (!t || t === user) t = foes[0];
+        if (t && t.currentHp <= 0) {
+          // A fainted ally target fails; a fainted foe target retargets the other foe.
+          if (t.side === user.side) return [];
+          t = foes[0];
+        }
+        if (!t) return [];
+        if (t.side !== user.side) {
+          const center = foes.find((f) => f.vol.centerOfAttention && !(f.vol.centerOfAttention === 'powder' && typesOf(user).includes('Grass')));
+          if (center) return [center];
+        }
+        const rod = allMons(this.s).find((m) => isAlive(m) && m !== user && m !== t && defenderAbility(m, user)?.redirectType === move.type);
+        if (rod && this.doubles) {
+          this.log('info', `${rod.name}'s ${abilityName(rod)} took the attack!`, rod.side);
+          return [rod];
+        }
+        return [t];
+      }
+    }
+  }
+
+  blocked(t: BattlePokemon, move: Move, entry: QueueEntry): boolean {
+    const user = entry.mon;
+    const tSide = this.s.sides[t.side];
+    if (move.target === 'ally' || move.target === 'selfAndAlly') return false;
+    if (t.vol.protected) {
+      this.log('info', `${t.name} protected itself!`, t.side);
+      return true;
+    }
+    if (tSide.wideGuard && SPREAD_TARGETS.has(move.target)) {
+      this.log('info', `Wide Guard protected ${t.name}!`, t.side);
+      return true;
+    }
+    if (tSide.quickGuard && entry.priority > 0 && user.side !== t.side) {
+      this.log('info', `Quick Guard protected ${t.name}!`, t.side);
+      return true;
+    }
+    return false;
+  }
+
+  accuracyHit(user: BattlePokemon, t: BattlePokemon, move: Move): boolean {
+    if (move.accuracy === null) return true;
+    const aAb = getAbility(user);
+    if (aAb?.noGuard || getAbility(t)?.noGuard) return true;
+    const tAb = defenderAbility(t, user);
+    const accStage = tAb?.unaware ? 0 : user.boosts.accuracy;
+    const evaStage = aAb?.unaware ? 0 : t.boosts.evasion;
+    const stage = clampStage(accStage - evaStage);
+    const chance = move.accuracy * accuracyStageMultiplier(stage) * (aAb?.accuracy?.(move) ?? 1);
+    return this.rng.next() * 100 < chance;
+  }
+
+  handleImmunity(t: BattlePokemon, imm: ImmunityResult) {
+    const name = `${t.name}'s ${abilityName(t)}`;
+    if (imm.flashFire) {
+      t.flashFire = true;
+      return this.log('info', `${name} raised the power of its Fire-type moves!`, t.side);
+    }
+    if (imm.heal) {
+      this.log('info', `${name} absorbed the attack!`, t.side);
+      if (t.currentHp < t.stats.hp) this.heal(t, Math.floor(t.stats.hp * imm.heal), 'restored HP');
+      return;
+    }
+    if (imm.boost) {
+      this.log('info', `${name} absorbed the attack!`, t.side);
+      return this.applyBoosts(t, imm.boost, null);
+    }
+    this.log('info', `It doesn't affect ${t.name}... (${abilityName(t)})`, t.side);
+  }
+
+  /** Runs a damaging move against one target. Returns damage dealt, or null if it had no effect. */
+  hit(user: BattlePokemon, t: BattlePokemon, move: Move, typeless: boolean, spread: boolean, sheerForce: boolean): number | null {
+    const eff = typeEffectiveness(user, t, move, typeless);
+    const tAb = defenderAbility(t, user);
+    const aAb = getAbility(user);
+    const imm = tAb?.immune?.({ attacker: user, defender: t, move, eff, crit: false, fromAlly: t.side === user.side });
+    if (imm) {
+      this.handleImmunity(t, imm);
+      return null;
+    }
+    if (eff === 0) {
+      this.log('info', `It doesn't affect ${t.name}...`, t.side);
+      return null;
+    }
+
+    const critStage = Math.min(3, (move.highCrit ? 1 : 0) + (aAb?.critStage ?? 0));
+    const critRoll = this.rng.next();
+    const crit = !tAb?.critImmune && critRoll < CRIT_CHANCES[critStage];
+    const roll = 85 + Math.floor(this.rng.next() * 16);
+    const tSide = this.s.sides[t.side];
+    const screen = move.category === 'Physical' ? tSide.reflect > 0 : tSide.lightScreen > 0;
+    const bd = calcDamage(user, t, move, {
+      crit, roll, typeless, spread, helpingHand: user.vol.helpingHand, screen, doubles: this.doubles,
+      attackerAlly: this.ally(user), defenderAlly: this.ally(t),
+    });
+
+    let dmg = bd.damage;
+    let endure = '';
+    if (t.currentHp === t.stats.hp && dmg >= t.currentHp) {
+      if (tAb?.sturdy) {
+        dmg = t.currentHp - 1;
+        endure = `${t.name} endured the hit with ${abilityName(t)}!`;
+      } else if (getItem(t)?.focusSash) {
+        dmg = t.currentHp - 1;
+        endure = `${t.name} hung on using its Focus Sash!`;
+        t.item = '';
+      }
+    }
+    if (bd.resistBerry) {
+      this.log('info', `${t.name}'s ${t.item} weakened the damage!`, t.side);
+      t.item = '';
+    }
+    const dealt = Math.min(dmg, t.currentHp);
+    t.currentHp -= dealt;
+
+    const on = spread ? ` on ${t.name}` : '';
+    if (crit) this.log('info', `A critical hit${on}!`, user.side);
+    if (eff > 1) this.log('info', `It's super effective${on}!`, user.side);
+    if (eff < 1) this.log('info', `It's not very effective${on}...`, user.side);
+    this.log('damage', `${t.name} lost ${dealt} HP (${pct(dealt, t.stats.hp)}).`, t.side, bd);
+    if (endure) this.log('info', endure, t.side);
+
+    if (t.currentHp > 0 && t.status === 'frz' && move.type === 'Fire') {
+      t.status = null;
+      this.log('status', `${t.name} thawed out!`, t.side);
+    }
+
+    if (t.currentHp > 0 && !sheerForce) {
+      const e = move.effects;
+      const mult = aAb?.sereneGrace ? 2 : 1;
+      if (e.status && this.canInflict(t, e.status.status, user) && chanceHit(e.status.chance * mult, this.rng)) {
+        this.inflict(t, e.status.status);
+      }
+      if (e.targetBoosts && chanceHit(e.targetBoosts.chance * mult, this.rng)) {
+        this.applyBoosts(t, e.targetBoosts.boosts, user);
+      }
+      if (e.flinch && !t.vol.moved && !tAb?.innerFocus && chanceHit(e.flinch * mult, this.rng)) {
+        t.vol.flinched = true;
+      }
+    }
+    return dealt;
+  }
+
+  /** Runs a status move against one target. Returns true if it took effect. */
+  statusEffect(user: BattlePokemon, t: BattlePokemon, move: Move): boolean {
+    const e = move.effects;
+    if (t !== user) {
+      const aAb = getAbility(user);
+      if (aAb?.prankster && t.side !== user.side && typesOf(t).includes('Dark')) {
+        this.log('info', `It doesn't affect ${t.name}...`, t.side);
+        return false;
+      }
+      if (e.status && typeEffectiveness(user, t, move) === 0) {
+        this.log('info', `It doesn't affect ${t.name}...`, t.side);
+        return false;
+      }
+      const imm = defenderAbility(t, user)?.immune?.({ attacker: user, defender: t, move, eff: 1, crit: false, fromAlly: t.side === user.side });
+      if (imm) {
+        this.handleImmunity(t, imm);
+        return false;
+      }
+    }
+    let acted = false;
+    if (e.status) {
+      if (!this.canInflict(t, e.status.status, user)) this.fail();
+      else if (chanceHit(e.status.chance, this.rng)) this.inflict(t, e.status.status);
+      acted = true;
+    }
+    if (e.heal) {
+      if (t.currentHp >= t.stats.hp) this.log('info', `${t.name}'s HP is full!`, t.side);
+      else this.heal(t, Math.floor((t.stats.hp * e.heal) / 100), 'restored HP');
+      acted = true;
+    }
+    if (e.targetBoosts && chanceHit(e.targetBoosts.chance, this.rng)) {
+      this.applyBoosts(t, e.targetBoosts.boosts, t === user ? null : user);
+      acted = true;
+    }
+    if (!acted && !e.selfBoosts) this.log('info', 'But nothing happened!');
+    return true;
+  }
+
+  endOfTurn() {
+    const order = this.speedOrder(allMons(this.s).filter(isAlive));
+    for (const mon of order) {
+      if (!isAlive(mon)) continue;
+      const ab = getAbility(mon);
+      const max = mon.stats.hp;
+      if (mon.status === 'tox') mon.toxicCounter = Math.min(15, mon.toxicCounter + 1);
+      if (!ab?.magicGuard) {
+        if (mon.status === 'brn') this.hurt(mon, Math.max(1, Math.floor(max / 16)), 'was hurt by its burn');
+        if (mon.status === 'psn') this.hurt(mon, Math.max(1, Math.floor(max / 8)), 'was hurt by poison');
+        if (mon.status === 'tox') this.hurt(mon, Math.max(1, Math.floor((max * mon.toxicCounter) / 16)), 'was hurt by poison');
+      }
+    }
+    for (const mon of order) {
+      const ab = getAbility(mon);
+      if (isAlive(mon) && ab?.endOfTurnBoosts) {
+        this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+        this.applyBoosts(mon, ab.endOfTurnBoosts, null);
+      }
+    }
+    this.s.sides.forEach((side, i) => {
+      const s = i as Side;
+      const tick = (key: 'tailwind' | 'reflect' | 'lightScreen', ended: string) => {
+        if (side[key] > 0 && --side[key] === 0) this.log('field', ended, s);
+      };
+      tick('tailwind', `${this.teamName(s)}'s Tailwind petered out!`);
+      tick('reflect', `${this.teamName(s)}'s Reflect wore off!`);
+      tick('lightScreen', `${this.teamName(s)}'s Light Screen wore off!`);
+    });
+    if (this.s.trickRoom > 0 && --this.s.trickRoom === 0) this.log('field', 'The twisted dimensions returned to normal!');
+    for (const mon of allMons(this.s)) if (isAlive(mon)) mon.turnsActive++;
+  }
+
+  /** Logs new faints and sets the winner. Returns true if the battle is over. */
+  checkFaints(): boolean {
+    for (const mon of allMons(this.s)) {
+      if (mon.currentHp <= 0 && !mon.faintLogged) {
+        mon.faintLogged = true;
+        this.log('faint', `${mon.name} fainted!`, mon.side);
+      }
+    }
+    const out = this.s.sides.map((side) => side.mons.every((m) => m.currentHp <= 0));
+    if (!out[0] && !out[1]) return false;
+    if (out[0] && out[1]) {
+      this.s.winner = 'draw';
+      this.log('result', 'Every Pokémon fainted. The battle is a draw!');
+    } else {
+      const winner: Side = out[0] ? 1 : 0;
       this.s.winner = winner;
-      this.log('result', `${this.name(winner)} wins the battle!`, winner);
+      const who = this.doubles ? `Player ${winner + 1}` : this.s.sides[winner].mons[0].name;
+      this.log('result', `${who} wins the battle!`, winner);
     }
     return true;
   }
 }
 
 /** Runs one full turn and returns the new state (the input state is not modified). */
-export function runTurn(state: BattleState, choices: [MoveChoice, MoveChoice], rng: Rng = mathRng): BattleState {
+export function runTurn(state: BattleState, choices: TurnChoices, rng: Rng = mathRng): BattleState {
   if (state.winner !== null) return state;
   const s = structuredClone(state);
   s.turn++;
   s.log.push({ turn: s.turn, kind: 'turn', text: `Turn ${s.turn}` });
-  const runner = new TurnRunner(s, rng);
-
-  const { order, reason } = determineOrder(s, choices, rng);
-  runner.log('order', reason, order[0]);
-
-  for (const side of order) {
-    runner.executeMove(side, choices[side]);
-    if (runner.checkFaints()) return s;
-  }
-  runner.endOfTurn(order);
-  runner.checkFaints();
+  new TurnRunner(s, rng).runTurn(choices);
   return s;
+}
+
+/** The order the actions would run in at the start of the turn (uids). For tests and previews. */
+export function previewOrder(state: BattleState, choices: TurnChoices, rng: Rng = mathRng): string[] {
+  const runner = new TurnRunner(structuredClone(state), rng);
+  runner.buildQueue(choices);
+  return runner.queue.map((e) => e.mon.uid);
 }

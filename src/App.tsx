@@ -2,27 +2,24 @@ import { useEffect, useRef, useState } from 'react';
 import { BattleView } from './components/BattleView';
 import { BuildEditor } from './components/BuildEditor';
 import { TypeBadge } from './components/common';
-import { PRESET_BUILDS, newId } from './data/presets';
-import { createBattle, runTurn } from './engine/battle';
-import type { BattleState, MoveChoice } from './engine/battle';
+import { activeCount, createBattle, runTurn } from './engine/battle';
+import type { BattleState, TurnChoices } from './engine/battle';
 import { validateBuild } from './engine/stats';
-import type { PokemonBuild } from './engine/types';
-import { loadLibrary, loadSides, normalizeBuild, saveLibrary, saveSides } from './storage';
+import type { Format, PokemonBuild } from './engine/types';
+import { defaultTeams, loadLibrary, loadTeams, normalizeBuild, saveLibrary, saveTeams } from './storage';
+import type { Teams } from './storage';
 
-function initialSides(): [PokemonBuild, PokemonBuild] {
-  return loadSides() ?? [
-    { ...structuredClone(PRESET_BUILDS[0]), id: newId() },
-    { ...structuredClone(PRESET_BUILDS[3]), id: newId() },
-  ];
-}
+const saved = loadTeams();
 
 export default function App() {
-  const [sides, setSides] = useState(initialSides);
+  const [teams, setTeams] = useState<Teams>(() => saved?.teams ?? defaultTeams());
+  const [format, setFormat] = useState<Format>(() => saved?.format ?? 'singles');
+  const [activeSlot, setActiveSlot] = useState<[number, number]>([0, 0]);
   const [library, setLibrary] = useState(loadLibrary);
   const [battle, setBattle] = useState<BattleState | null>(null);
   const [notice, setNotice] = useState('');
 
-  useEffect(() => { saveSides(sides); }, [sides]);
+  useEffect(() => { saveTeams(teams, format); }, [teams, format]);
   useEffect(() => { saveLibrary(library); }, [library]);
   useEffect(() => {
     if (!notice) return;
@@ -30,7 +27,16 @@ export default function App() {
     return () => clearTimeout(t);
   }, [notice]);
 
-  const setSide = (i: 0 | 1) => (b: PokemonBuild) => setSides((prev) => (i === 0 ? [b, prev[1]] : [prev[0], b]));
+  const n = activeCount(format);
+  const slotFor = (side: 0 | 1) => Math.min(activeSlot[side], n - 1);
+
+  function setBuild(side: 0 | 1, slot: number, b: PokemonBuild) {
+    setTeams((prev) => {
+      const next = [prev[0].slice(), prev[1].slice()] as Teams;
+      next[side][slot] = b;
+      return next;
+    });
+  }
 
   function saveToLibrary(b: PokemonBuild) {
     setLibrary((prev) => {
@@ -40,15 +46,17 @@ export default function App() {
     setNotice(`Saved “${b.name}” to your library.`);
   }
 
-  const canBattle = sides.every((b) => validateBuild(b).length === 0);
+  const inPlay = teams.map((t) => t.slice(0, n));
+  const canBattle = inPlay.every((t) => t.every((b) => validateBuild(b).length === 0));
+  const start = () => setBattle(createBattle(teams, format));
 
   if (battle) {
     return (
-      <Shell notice={notice}>
+      <Shell notice={notice} format={battle.format}>
         <BattleView
           battle={battle}
-          onRunTurn={(choices: [MoveChoice, MoveChoice]) => setBattle(runTurn(battle, choices))}
-          onRematch={() => setBattle(createBattle(sides[0], sides[1]))}
+          onRunTurn={(choices: TurnChoices) => setBattle(runTurn(battle, choices))}
+          onRematch={start}
           onExit={() => setBattle(null)}
         />
       </Shell>
@@ -56,29 +64,67 @@ export default function App() {
   }
 
   return (
-    <Shell notice={notice}>
+    <Shell notice={notice} format={format}>
       <div className="start-bar">
-        <button className="primary big" disabled={!canBattle} onClick={() => setBattle(createBattle(sides[0], sides[1]))}>
-          Start battle
-        </button>
+        <div className="segmented" role="radiogroup" aria-label="Battle format">
+          {(['singles', 'doubles'] as Format[]).map((f) => (
+            <button key={f} role="radio" aria-checked={format === f} className={format === f ? 'on' : ''} onClick={() => setFormat(f)}>
+              {f === 'singles' ? 'Singles (1v1)' : 'Doubles (2v2)'}
+            </button>
+          ))}
+        </div>
+        <button className="primary big" disabled={!canBattle} onClick={start}>Start battle</button>
         {!canBattle && <span className="muted">Fix the errors below to start.</span>}
-        <button className="ghost" onClick={() => setSides(([a, b]) => [b, a])}>Swap sides</button>
+        <button className="ghost" onClick={() => setTeams(([a, b]) => [b, a])}>Swap sides</button>
       </div>
       <div className="builders">
-        <BuildEditor label="Player 1" build={sides[0]} onChange={setSide(0)} library={library} onSave={saveToLibrary} />
-        <BuildEditor label="Player 2" build={sides[1]} onChange={setSide(1)} library={library} onSave={saveToLibrary} />
+        {([0, 1] as const).map((side) => {
+          const slot = slotFor(side);
+          const tabs = n > 1 ? (
+            <div className="slot-tabs" role="tablist" aria-label={`Player ${side + 1} team`}>
+              {teams[side].slice(0, n).map((b, i) => {
+                const invalid = validateBuild(b).length > 0;
+                return (
+                  <button
+                    key={i} role="tab" aria-selected={slot === i} className={slot === i ? 'on' : ''}
+                    onClick={() => setActiveSlot((prev) => (side === 0 ? [i, prev[1]] : [prev[0], i]))}
+                  >
+                    <span className="slot-letter">{'AB'[i]}</span> {b.name || 'Unnamed'}{invalid && <span className="tab-error" title="Has errors"> ⚠</span>}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null;
+          return (
+            <BuildEditor
+              key={side}
+              label={`Player ${side + 1}`}
+              tabs={tabs}
+              build={teams[side][slot]}
+              onChange={(b) => setBuild(side, slot, b)}
+              library={library}
+              onSave={saveToLibrary}
+            />
+          );
+        })}
       </div>
-      <LibraryPanel library={library} setLibrary={setLibrary} onLoad={(b, side) => setSide(side)(structuredClone(b))} setNotice={setNotice} />
+      <LibraryPanel
+        library={library}
+        setLibrary={setLibrary}
+        onLoad={(b, side) => setBuild(side, slotFor(side), structuredClone(b))}
+        loadLabel={(side) => `To P${side + 1}${n > 1 ? 'AB'[slotFor(side)] : ''}`}
+        setNotice={setNotice}
+      />
     </Shell>
   );
 }
 
-function Shell({ children, notice }: { children: React.ReactNode; notice: string }) {
+function Shell({ children, notice, format }: { children: React.ReactNode; notice: string; format: Format }) {
   return (
     <div className="app">
       <header className="app-head">
         <h1>Battle Simulator</h1>
-        <span className="muted">Singles · Gen 5+ damage formula</span>
+        <span className="muted">{format === 'doubles' ? 'Doubles' : 'Singles'} · Gen 5+ damage formula</span>
       </header>
       {children}
       {notice && <div className="toast" role="status">{notice}</div>}
@@ -87,11 +133,12 @@ function Shell({ children, notice }: { children: React.ReactNode; notice: string
 }
 
 function LibraryPanel({
-  library, setLibrary, onLoad, setNotice,
+  library, setLibrary, onLoad, loadLabel, setNotice,
 }: {
   library: PokemonBuild[];
   setLibrary: (fn: (prev: PokemonBuild[]) => PokemonBuild[]) => void;
   onLoad: (b: PokemonBuild, side: 0 | 1) => void;
+  loadLabel: (side: 0 | 1) => string;
   setNotice: (s: string) => void;
 }) {
   const fileInput = useRef<HTMLInputElement>(null);
@@ -158,15 +205,20 @@ function LibraryPanel({
         <ul className="library-list">
           {library.map((b) => (
             <li key={b.id}>
-              <span className="lib-name"><strong>{b.name}</strong> <span className="muted">Lv {b.level}</span></span>
+              <span className="lib-name">
+                <strong>{b.name}</strong> <span className="muted">Lv {b.level}</span>
+                {(b.ability || b.item) && (
+                  <span className="muted lib-extra">{[b.ability === 'Custom' ? b.customAbility?.name : b.ability, b.item].filter(Boolean).join(' · ')}</span>
+                )}
+              </span>
               <span className="types-line">
                 <TypeBadge type={b.type1} small />
                 {b.type2 && <TypeBadge type={b.type2} small />}
               </span>
               <span className="muted lib-moves">{b.moves.filter(Boolean).map((m) => m!.name).join(' · ')}</span>
               <span className="row">
-                <button className="small" onClick={() => onLoad(b, 0)}>To P1</button>
-                <button className="small" onClick={() => onLoad(b, 1)}>To P2</button>
+                <button className="small" onClick={() => onLoad(b, 0)}>{loadLabel(0)}</button>
+                <button className="small" onClick={() => onLoad(b, 1)}>{loadLabel(1)}</button>
                 {pendingDelete === b.id ? (
                   <>
                     <button
