@@ -89,6 +89,7 @@ export const MOVE_SPECIALS = [
   'allySwitch', 'afterYou', 'quash', 'pollenPuff', 'tailwind', 'trickRoom', 'reflect', 'lightScreen',
   'sunnyDay', 'rainDance', 'sandstorm', 'snowscape', 'electricTerrain', 'grassyTerrain', 'psychicTerrain', 'mistyTerrain',
   'weatherBall', 'stormAccuracy', 'snowAccuracy', 'instruct', 'beatUp',
+  'taunt', 'encore', 'substitute', 'leechSeed',
 ] as const;
 export type MoveSpecial = (typeof MOVE_SPECIALS)[number];
 
@@ -122,6 +123,10 @@ export const MOVE_SPECIAL_LABELS: Record<MoveSpecial, string> = {
   snowAccuracy: 'Never misses in snow',
   instruct: 'Instruct (target repeats its last move)',
   beatUp: 'Beat Up (one hit per healthy team member)',
+  taunt: 'Taunt (target can’t use status moves, 3 turns)',
+  encore: 'Encore (target repeats its last move, 3 turns)',
+  substitute: 'Substitute (costs 1/4 HP, absorbs attacks)',
+  leechSeed: 'Leech Seed (drains 1/8 HP each turn)',
 };
 
 export interface Move {
@@ -252,7 +257,15 @@ export interface BattlePokemon {
   faintLogged: boolean;
   /** Confusion turns remaining (0 = not confused). */
   confusion: number;
-  /** The last move this Pokémon used (for Instruct). */
+  /** Turns of Taunt left (0 = not taunted). */
+  taunt: number;
+  /** Encore: the move slot it's locked into and turns left. */
+  encore: { move: number; turns: number } | null;
+  /** HP left on its Substitute (0 = none). */
+  substituteHp: number;
+  /** Seeded by Leech Seed: the field position that receives the drained HP. */
+  leechSeed: { side: Side; slot: number } | null;
+  /** The last move this Pokémon used (for Instruct and Encore). */
   lastAction: { move: number; target?: { side: Side; slot: number } } | null;
   vol: TurnVolatiles;
 }

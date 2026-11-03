@@ -79,6 +79,8 @@ export interface AbilityDef {
   leafGuard?: boolean;
   ownTempo?: boolean;
   skillLink?: boolean;
+  /** Its moves ignore Substitute, Reflect and Light Screen. */
+  infiltrator?: boolean;
   /** Not grounded (Levitate): ignores terrain and Ground moves. */
   airborne?: boolean;
 
@@ -303,6 +305,7 @@ export const ABILITIES: Record<string, AbilityDef> = {
     immune: (c) => (c.move.flags?.includes('sound') ? {} : null),
   },
   'Skill Link': { desc: 'Multi-hit moves always hit the maximum number of times.', skillLink: true },
+  Infiltrator: { desc: 'Its moves ignore the target’s Substitute, Reflect and Light Screen.', infiltrator: true },
   'Own Tempo': { desc: 'Can’t be confused; immune to Intimidate.', breakable: true, ownTempo: true },
 };
 

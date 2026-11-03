@@ -60,6 +60,8 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Super Fang', 'Normal', 'Physical', 1, 90, 10, { effects: { fixedDamage: 'halfHp' } }),
   mv('Weather Ball', 'Normal', 'Special', 50, 100, 10, { special: 'weatherBall' }),
   mv('Swagger', 'Normal', 'Status', 0, 85, 15, { effects: { targetBoosts: { boosts: { atk: 2 }, chance: 100 }, confuse: 100 } }),
+  mv('Encore', 'Normal', 'Status', 0, 100, 5, { target: 'normal', special: 'encore' }),
+  mv('Substitute', 'Normal', 'Status', 0, null, 10, { special: 'substitute' }),
   // Fire
   mv('Flamethrower', 'Fire', 'Special', 90, 100, 15, { effects: { status: { status: 'brn', chance: 10 } } }),
   mv('Fire Blast', 'Fire', 'Special', 110, 85, 5, { effects: { status: { status: 'brn', chance: 10 } } }),
@@ -93,6 +95,7 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Leaf Blade', 'Grass', 'Physical', 90, 100, 15, { highCrit: true }),
   mv('Spore', 'Grass', 'Status', 0, 100, 15, { effects: { status: { status: 'slp', chance: 100 } } }),
   mv('Bullet Seed', 'Grass', 'Physical', 25, 100, 30, { effects: { multiHit: [2, 5] } }),
+  mv('Leech Seed', 'Grass', 'Status', 0, 90, 10, { target: 'normal', special: 'leechSeed' }),
   mv('Grassy Terrain', 'Grass', 'Status', 0, null, 10, { target: 'field', special: 'grassyTerrain' }),
   mv('Rage Powder', 'Bug', 'Status', 0, null, 20, { priority: 2, special: 'ragePowder' }),
   // Ice
@@ -166,6 +169,7 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Snarl', 'Dark', 'Special', 55, 95, 15, { ...FOES, effects: { targetBoosts: { boosts: { spa: -1 }, chance: 100 } } }),
   mv('Quash', 'Dark', 'Status', 0, 100, 15, { target: 'normal', special: 'quash' }),
   mv('Beat Up', 'Dark', 'Physical', 1, 100, 10, { special: 'beatUp' }),
+  mv('Taunt', 'Dark', 'Status', 0, 100, 20, { target: 'normal', special: 'taunt' }),
   // Steel
   mv('Iron Head', 'Steel', 'Physical', 80, 100, 15, { effects: { flinch: 30 } }),
   mv('Flash Cannon', 'Steel', 'Special', 80, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),

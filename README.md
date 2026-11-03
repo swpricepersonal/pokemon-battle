@@ -16,9 +16,9 @@ npm run build:artifact  # one standalone HTML page in dist-artifact/
 
 - **Builder**: name, level (1–100), one or two of the 18 types, all 25 natures, base stats, IVs (0–31) and EVs (0–252 each, 510 total). Final stats update live.
 - **Formats**: singles (1v1) or doubles (2v2, all four on the field). Each player has two team slots; singles uses slot A. You can also start the battle with weather or terrain that lasts the whole battle.
-- **Abilities**: 100 preset abilities, or a **custom ability** built from generic effects (stat multipliers, a type power boost, a type immunity that can heal or raise a stat, a type resistance, STAB multiplier, super-effective damage reduction, crit immunity, status immunities, weather or terrain on entry, contact status or damage, Intimidate-style start effects and Speed Boost-style end-of-turn boosts).
+- **Abilities**: 101 preset abilities, or a **custom ability** built from generic effects (stat multipliers, a type power boost, a type immunity that can heal or raise a stat, a type resistance, STAB multiplier, super-effective damage reduction, crit immunity, status immunities, weather or terrain on entry, contact status or damage, Intimidate-style start effects and Speed Boost-style end-of-turn boosts).
 - **Held items** (59): Choice Band/Specs/Scarf, Life Orb, Expert Belt, Muscle Band, Wise Glasses, the 18 type-boosting items, Assault Vest, Eviolite, Focus Sash, the 18 resist berries, Leftovers, Black Sludge, Sitrus Berry, Oran Berry, Lum Berry, Shell Bell, Rocky Helmet, Heat/Damp/Smooth/Icy Rock, Terrain Extender and Light Clay.
-- **Moves**: pick from a 133-move library or make your own: type, Physical/Special/Status, power, accuracy (or never-miss), PP, priority, high crit ratio, flags (contact, punch, bite, pulse, sound, powder), and effects (status chance, stat-stage changes to the target or user, flinch, confusion, drain, recoil, healing, multi-hit, fixed damage), who the move targets, and an optional special behavior (Protect, Follow Me, Helping Hand, Tailwind, Trick Room, weather and terrain moves, Weather Ball, Instruct, Beat Up, etc.).
+- **Moves**: pick from a 137-move library or make your own: type, Physical/Special/Status, power, accuracy (or never-miss), PP, priority, high crit ratio, flags (contact, punch, bite, pulse, sound, powder), and effects (status chance, stat-stage changes to the target or user, flinch, confusion, drain, recoil, healing, multi-hit, fixed damage), who the move targets, and an optional special behavior (Protect, Follow Me, Helping Hand, Tailwind, Trick Room, weather and terrain moves, Weather Ball, Instruct, Beat Up, etc.).
 - **Battle**: choose a move for each Pokémon (and a target in doubles), or use "Random moves", then run the turn. Each move button previews the min–max damage as a % of each foe's HP.
 - **Battle log**: game-style messages; click any damage line to see the full calculation.
 - **Saving**: both teams, the format, and a library of saved builds persist in your browser's local storage. Import/export the library as JSON.
@@ -48,11 +48,13 @@ npm run build:artifact  # one standalone HTML page in dist-artifact/
 
 **Status**: burn, paralysis (25% full paralysis, 0.5× Speed), poison, bad poison, sleep (1–3 turns), freeze (20% thaw chance per turn, thawed by Fire moves). Type immunities apply (Fire can't be burned, Electric can't be paralyzed, Poison/Steel can't be poisoned, Ice can't be frozen). Stat stages run from −6 to +6. When every move is out of PP the Pokémon uses Struggle.
 
-**Not modeled**: bench Pokémon and switching (including switching moves), and volatile conditions other than confusion and flinching (Taunt, Encore, Substitute, Leech Seed, etc.).
+**Taunt, Encore, Substitute, Leech Seed**: Taunt blocks status moves for 3 turns (4 if the target already moved that turn), including a status move already chosen that turn. Encore locks the target into its last move for 3 turns (4 if it already moved), replacing whatever it chose that turn; it fails if the target hasn't moved yet or is already encored. Substitute costs 1/4 max HP and takes damage in its place, blocking status moves (Taunt and Encore still work) and extra effects; sound moves and Infiltrator go around it. Leech Seed drains 1/8 max HP each turn to whoever is in the user's position (not Grass types, not through a Substitute; Magic Guard blocks it).
+
+**Not modeled**: bench Pokémon and switching (including switching moves), and other volatile conditions (Disable, Torment, Yawn, Perish Song, etc.).
 
 ## Code layout
 
-- `src/engine/`: pure TypeScript battle engine (no UI): `stats.ts`, `typeChart.ts`, `modifiers.ts` (4096-based rounding), `abilities.ts`, `items.ts`, `damage.ts`, `battle.ts` (turn resolution for singles and doubles, weather, terrain and field effects, with an injectable RNG). Tests live in `engine.test.ts` and `field.test.ts`.
+- `src/engine/`: pure TypeScript battle engine (no UI): `stats.ts`, `typeChart.ts`, `modifiers.ts` (4096-based rounding), `abilities.ts`, `items.ts`, `damage.ts`, `battle.ts` (turn resolution for singles and doubles, weather, terrain and field effects, with an injectable RNG). Tests live in `engine.test.ts`, `field.test.ts` and `volatiles.test.ts`.
 - `src/data/presets.ts`: the move library and sample creatures.
 - `src/components/`: React UI (builder, move editor, battle view).
 - `src/storage.ts`: local storage persistence and JSON import validation.

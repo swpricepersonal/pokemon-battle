@@ -122,6 +122,10 @@ export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 
     faintLogged: false,
     confusion: 0,
     lastAction: null,
+    taunt: 0,
+    encore: null,
+    substituteHp: 0,
+    leechSeed: null,
     vol: freshVolatiles(),
   };
 }
@@ -198,10 +202,12 @@ export function foesOf(state: BattleState, mon: BattlePokemon): BattlePokemon[] 
 /** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
 export function availableChoices(mon: BattlePokemon): MoveChoice[] {
   const item = getItem(mon);
+  if (mon.encore && mon.pp[mon.encore.move] > 0 && mon.build.moves[mon.encore.move]) return [mon.encore.move];
   const choices = mon.build.moves.flatMap((m, i) => {
     if (!m || mon.pp[i] <= 0) return [];
     if (mon.choiceLock !== null && mon.choiceLock !== i) return [];
     if (item?.noStatusMoves && m.category === 'Status') return [];
+    if (mon.taunt > 0 && m.category === 'Status') return [];
     return [i];
   });
   return choices.length ? choices : [STRUGGLE_INDEX];
@@ -626,9 +632,20 @@ class TurnRunner {
   }
 
   executeAction(entry: QueueEntry, instructed = false) {
-    const { mon: user, action } = entry;
+    const user = entry.mon;
     if (!isAlive(user)) return;
     user.vol.moved = true;
+
+    // An Encore that started earlier this turn replaces the chosen move.
+    const enc = user.encore;
+    if (enc && !instructed && entry.action.move !== STRUGGLE_INDEX && entry.action.move !== enc.move && user.pp[enc.move] > 0) {
+      const encored = user.build.moves[enc.move];
+      if (encored) {
+        entry.action = { move: enc.move, target: entry.action.target };
+        entry.move = encored;
+      }
+    }
+    const action = entry.action;
 
     if (user.vol.flinched && !instructed) {
       this.log('status', `${user.name} flinched and couldn't move!`, user.side);
@@ -641,6 +658,10 @@ class TurnRunner {
     }
 
     const struggle = action.move === STRUGGLE_INDEX;
+    if (!struggle && user.taunt > 0 && entry.move.category === 'Status') {
+      this.log('info', `${user.name} can't use ${entry.move.name} after the taunt!`, user.side);
+      return;
+    }
     if (struggle) {
       this.log('info', `${user.name} has no moves left!`, user.side);
     } else {
@@ -709,6 +730,18 @@ class TurnRunner {
       case 'fakeOut':
         if (user.turnsActive > 0) return this.fail();
         break;
+      case 'substitute': {
+        const cost = Math.floor(user.stats.hp / 4);
+        if (user.substituteHp > 0) return this.log('info', `${user.name} already has a substitute!`, user.side);
+        if (user.currentHp <= cost || cost < 1) {
+          return this.log('info', 'But it does not have enough HP left to make a substitute!', user.side);
+        }
+        user.currentHp -= cost;
+        user.substituteHp = cost;
+        this.log('info', `${user.name} put in a substitute! (-${cost} HP)`, user.side);
+        this.checkPinchBerry(user);
+        return;
+      }
     }
 
     const targets = this.resolveTargets(user, move, action);
@@ -766,6 +799,8 @@ class TurnRunner {
           anyHit = true;
           totalDealt += dealt;
         }
+      } else if (sp === 'taunt' || sp === 'encore' || sp === 'leechSeed') {
+        if (this.volatileMove(user, t, move, sp)) anyHit = true;
       } else if (this.statusEffect(user, t, move)) {
         anyHit = true;
       }
@@ -984,10 +1019,21 @@ class TurnRunner {
     }
     const on = spread ? ` on ${t.name}` : '';
 
+    // Sound moves and Infiltrator go around a Substitute.
+    const subBlocks = () => t.substituteHp > 0 && t !== user && !move.flags?.includes('sound') && !aAb?.infiltrator;
+    const hitSubstitute = (amount: number, bd?: DamageBreakdown) => {
+      const taken = Math.min(amount, t.substituteHp);
+      t.substituteHp -= taken;
+      this.log('damage', `The substitute took damage for ${t.name}! (${taken} HP)`, t.side, bd);
+      if (t.substituteHp === 0) this.log('info', `${t.name}'s substitute faded!`, t.side);
+      return taken;
+    };
+
     // Fixed-damage moves skip the formula entirely.
     const fixed = move.effects.fixedDamage;
     if (fixed !== undefined) {
       const amount = fixed === 'level' ? user.build.level : fixed === 'halfHp' ? Math.max(1, Math.floor(t.currentHp / 2)) : fixed;
+      if (subBlocks()) return hitSubstitute(amount);
       const { dealt, endure } = this.applyHitDamage(t, amount, tAb);
       this.log('damage', `${t.name} lost ${dealt} HP (${pct(dealt, t.stats.hp)}).`, t.side);
       if (endure) this.log('info', endure, t.side);
@@ -998,19 +1044,32 @@ class TurnRunner {
 
     const powers = this.hitPowers(user, move);
     const tSide = this.s.sides[t.side];
-    const screen = move.category === 'Physical' ? tSide.reflect > 0 : tSide.lightScreen > 0;
+    const screen = !aAb?.infiltrator && (move.category === 'Physical' ? tSide.reflect > 0 : tSide.lightScreen > 0);
     let total = 0;
     let hits = 0;
+    let hitSub = false;
     for (const power of powers) {
       if (!isAlive(t) || !isAlive(user)) break;
       const m = power === move.power ? move : { ...move, power };
       const critStage = Math.min(3, (m.highCrit ? 1 : 0) + (aAb?.critStage ?? 0));
       const crit = this.rng.next() < CRIT_CHANCES[critStage] && !tAb?.critImmune;
       const roll = 85 + Math.floor(this.rng.next() * 16);
-      const bd = calcDamage(user, t, m, {
+      const onSub = subBlocks();
+      // A Substitute doesn't use the Pokémon's held item.
+      const defender = onSub ? { ...t, item: '' } : t;
+      const bd = calcDamage(user, defender, m, {
         crit, roll, typeless, spread, helpingHand: user.vol.helpingHand, screen, ...field,
         attackerAlly: this.ally(user), defenderAlly: this.ally(t),
       });
+      if (onSub) {
+        hits++;
+        hitSub = true;
+        if (crit) this.log('info', `A critical hit${on}!`, user.side);
+        if (hits === 1 && eff > 1) this.log('info', `It's super effective${on}!`, user.side);
+        if (hits === 1 && eff < 1) this.log('info', `It's not very effective${on}...`, user.side);
+        total += hitSubstitute(bd.damage, bd);
+        continue;
+      }
       if (bd.resistBerry) {
         this.log('info', `${t.name}'s ${t.item} weakened the damage!`, t.side);
         t.item = '';
@@ -1033,7 +1092,7 @@ class TurnRunner {
       this.log('status', `${t.name} thawed out!`, t.side);
     }
 
-    if (t.currentHp > 0 && !sheerForce) {
+    if (t.currentHp > 0 && !sheerForce && !hitSub) {
       const e = move.effects;
       const mult = aAb?.sereneGrace ? 2 : 1;
       if (e.status && this.canInflict(t, e.status.status, user) && chanceHit(e.status.chance * mult, this.rng)) {
@@ -1051,24 +1110,63 @@ class TurnRunner {
   }
 
   /** Runs a status move against one target. Returns true if it took effect. */
+  /** Checks shared by status moves aimed at another Pokémon. Returns true (and logs why) if the move is stopped. */
+  statusMoveStopped(user: BattlePokemon, t: BattlePokemon, move: Move, bypassSub: boolean): boolean {
+    if (t === user) return false;
+    if (getAbility(user)?.prankster && t.side !== user.side && typesOf(t).includes('Dark')) {
+      this.log('info', `It doesn't affect ${t.name}...`, t.side);
+      return true;
+    }
+    if (move.effects.status && typeEffectiveness(user, t, move) === 0) {
+      this.log('info', `It doesn't affect ${t.name}...`, t.side);
+      return true;
+    }
+    const imm = defenderAbility(t, user)?.immune?.({ attacker: user, defender: t, move, eff: 1, crit: false, fromAlly: t.side === user.side, ...fieldDamageOpts(this.s) });
+    if (imm) {
+      this.handleImmunity(t, imm);
+      return true;
+    }
+    const allyMove = move.target === 'ally' || move.target === 'selfAndAlly';
+    if (t.substituteHp > 0 && !bypassSub && !allyMove && !move.flags?.includes('sound') && !getAbility(user)?.infiltrator) {
+      this.fail();
+      return true;
+    }
+    return false;
+  }
+
+  /** Taunt, Encore and Leech Seed. Returns true if it took effect. */
+  volatileMove(user: BattlePokemon, t: BattlePokemon, move: Move, sp: 'taunt' | 'encore' | 'leechSeed'): boolean {
+    // Taunt and Encore go through a Substitute; Leech Seed doesn't.
+    if (this.statusMoveStopped(user, t, move, sp !== 'leechSeed')) return false;
+    // Effects that last "3 turns" get an extra turn if the target has already moved this turn.
+    const turns = t.vol.moved ? 4 : 3;
+    if (sp === 'taunt') {
+      if (t.taunt > 0) return this.fail(), false;
+      t.taunt = turns;
+      this.log('status', `${t.name} fell for the taunt!`, t.side);
+      return true;
+    }
+    if (sp === 'encore') {
+      const last = t.lastAction;
+      const lastMove = last ? t.build.moves[last.move] : null;
+      if (t.encore || !last || !lastMove || lastMove.special === 'encore' || t.pp[last.move] <= 0) return this.fail(), false;
+      t.encore = { move: last.move, turns };
+      this.log('status', `${t.name} must do an encore of ${lastMove.name}!`, t.side);
+      return true;
+    }
+    if (typesOf(t).includes('Grass')) {
+      this.log('info', `It doesn't affect ${t.name}...`, t.side);
+      return false;
+    }
+    if (t.leechSeed) return this.fail(), false;
+    t.leechSeed = { side: user.side, slot: slotOf(this.s, user) };
+    this.log('status', `${t.name} was seeded!`, t.side);
+    return true;
+  }
+
   statusEffect(user: BattlePokemon, t: BattlePokemon, move: Move): boolean {
     const e = move.effects;
-    if (t !== user) {
-      const aAb = getAbility(user);
-      if (aAb?.prankster && t.side !== user.side && typesOf(t).includes('Dark')) {
-        this.log('info', `It doesn't affect ${t.name}...`, t.side);
-        return false;
-      }
-      if (e.status && typeEffectiveness(user, t, move) === 0) {
-        this.log('info', `It doesn't affect ${t.name}...`, t.side);
-        return false;
-      }
-      const imm = defenderAbility(t, user)?.immune?.({ attacker: user, defender: t, move, eff: 1, crit: false, fromAlly: t.side === user.side, ...fieldDamageOpts(this.s) });
-      if (imm) {
-        this.handleImmunity(t, imm);
-        return false;
-      }
-    }
+    if (this.statusMoveStopped(user, t, move, false)) return false;
     let acted = false;
     if (e.status) {
       if (!this.canInflict(t, e.status.status, user)) this.fail();
@@ -1123,6 +1221,14 @@ class TurnRunner {
       if (frac > 0) this.heal(mon, Math.max(1, Math.floor(mon.stats.hp * frac)), `restored HP with its ${mon.item}`);
       if (frac < 0 && !getAbility(mon)?.magicGuard) this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp * -frac)), `was hurt by its ${mon.item}`);
     }
+    // Leech Seed
+    for (const mon of order()) {
+      if (!mon.leechSeed || getAbility(mon)?.magicGuard) continue;
+      const before = mon.currentHp;
+      this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp / 8)), 'had its health sapped by Leech Seed');
+      const receiver = monAt(this.s, mon.leechSeed);
+      if (isAlive(receiver) && receiver !== mon) this.heal(receiver, before - mon.currentHp, 'restored HP from Leech Seed');
+    }
     // Status damage
     for (const mon of order()) {
       const ab = getAbility(mon);
@@ -1162,7 +1268,15 @@ class TurnRunner {
       this.log('field', `The ${TERRAIN_LABELS[this.s.terrain]} disappeared.`);
       this.s.terrain = null;
     }
-    for (const mon of allMons(this.s)) if (isAlive(mon)) mon.turnsActive++;
+    for (const mon of allMons(this.s)) {
+      if (!isAlive(mon)) continue;
+      if (mon.taunt > 0 && --mon.taunt === 0) this.log('status', `${mon.name} shook off the taunt!`, mon.side);
+      if (mon.encore && (--mon.encore.turns <= 0 || mon.pp[mon.encore.move] <= 0)) {
+        mon.encore = null;
+        this.log('status', `${mon.name}'s encore ended!`, mon.side);
+      }
+      mon.turnsActive++;
+    }
   }
 
   /** Logs new faints and sets the winner. Returns true if the battle is over. */

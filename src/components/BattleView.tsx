@@ -158,7 +158,7 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
         Atk {mon.stats.atk} · Def {mon.stats.def} · SpA {mon.stats.spa} · SpD {mon.stats.spd} · Spe {mon.stats.spe}
         {speed !== mon.stats.spe && <> (effective {speed})</>}
       </div>
-      {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0) && (
+      {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0 || mon.substituteHp > 0 || mon.taunt > 0 || mon.encore || mon.leechSeed) && (
         <div className="chips">
           {mon.status && (
             <span className="chip">
@@ -168,6 +168,10 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
             </span>
           )}
           {mon.confusion > 0 && <span className="chip">Confused</span>}
+          {mon.substituteHp > 0 && <span className="chip">Substitute · {mon.substituteHp} HP</span>}
+          {mon.taunt > 0 && <span className="chip">Taunted · {mon.taunt} turn{mon.taunt === 1 ? '' : 's'}</span>}
+          {mon.encore && <span className="chip">Encore: {mon.build.moves[mon.encore.move]?.name} · {mon.encore.turns} turn{mon.encore.turns === 1 ? '' : 's'}</span>}
+          {mon.leechSeed && <span className="chip">Seeded</span>}
           {lockedMove && <span className="chip">Locked into {lockedMove}</span>}
           {boosts.map((k) => (
             <span key={k} className={`chip ${mon.boosts[k] > 0 ? 'up' : 'down'}`}>
