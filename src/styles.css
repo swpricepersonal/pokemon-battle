@@ -334,6 +334,7 @@ select.stage { padding: 4px 2px; width: 56px; text-align: center; font-variant-n
 .hp-editor input.num { width: 56px; }
 .hp-edit-btn { font-weight: 400; }
 .log-line.kind-switch { font-weight: 600; }
+.locked-note { padding: 10px 12px; border: 1px dashed var(--border); border-radius: 8px; background: var(--panel); font-weight: 600; }
 
 /* Library */
 .lib-heading { font-size: 14px; margin: 14px 0 6px; }

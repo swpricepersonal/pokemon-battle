@@ -1,10 +1,13 @@
 import { ABILITY_NAMES } from '../engine/abilities';
 import { MOVE_LIBRARY } from '../data/presets';
 import {
-  BOOSTABLE_STATS, BOOST_LABELS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS,
-  MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, SWAP_ABILITIES, TYPES,
+  BOOSTABLE_STATS, BOOST_LABELS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, HIDDEN_LABELS, HIDDEN_STATES, MAJOR_STATUSES,
+  MOVE_FLAGS, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, SWAP_ABILITIES, TYPES, WEATHERS,
+  WEATHER_LABELS,
 } from '../engine/types';
-import type { Boosts, Hazard, MajorStatus, Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, TypeName } from '../engine/types';
+import type {
+  Boosts, Hazard, Hidden, ItemChange, MajorStatus, Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, TypeName, Weather,
+} from '../engine/types';
 import { NumField, StageSelect, TypeBadge } from './common';
 import { canon, useSaved } from './saved';
 
@@ -133,6 +136,13 @@ export function MoveEditor({
 
 const fmtBoosts = (b: Partial<Boosts>) => Object.entries(b).filter(([, v]) => v).map(([k, v]) => `${v! > 0 ? '+' : ''}${v} ${k}`).join(' ');
 
+const ITEM_CHANGE_LABELS: Record<ItemChange, string> = {
+  remove: 'Removes the target’s item (Knock Off)',
+  steal: 'Steals the target’s item (Thief)',
+  swap: 'Swaps items with the target (Trick)',
+  give: 'Gives the user’s item to the target (Bestow)',
+};
+
 function abilityLabel(a: NonNullable<MoveEffects['targetAbility']>): string {
   if (a.ability === '') return 'removes ability';
   if (a.ability === COPY_USER_ABILITY) return 'gives user’s ability';
@@ -164,6 +174,10 @@ function summarize(e: MoveEffects): string {
   if (e.clearHazards) parts.push(e.clearHazards === 'own' ? 'clears own hazards' : 'clears all hazards');
   if (e.selfSwitch) parts.push(e.selfSwitch === 'batonPass' ? 'Baton Pass' : 'user switches out');
   if (e.forceSwitch) parts.push('forces a switch');
+  if (e.charge) parts.push(`charges first${e.charge.hide ? `, hides ${HIDDEN_LABELS[e.charge.hide].split(' (')[0]}` : ''}${e.charge.skipIn ? `, instant in ${WEATHER_LABELS[e.charge.skipIn].toLowerCase()}` : ''}${e.charge.boosts ? ` (${fmtBoosts(e.charge.boosts)})` : ''}`);
+  if (e.recharge) parts.push('must recharge');
+  if (e.itemChange) parts.push(ITEM_CHANGE_LABELS[e.itemChange].split(' (')[0].toLowerCase());
+  if (e.itemBoost) parts.push('×1.5 vs held item');
   return parts.join(', ') || 'none';
 }
 
@@ -287,6 +301,20 @@ function EffectsEditor({
             <option value="both">Removes hazards from both sides (Defog)</option>
           </select>
         </div>
+        <div className="effect-row">
+          <span className="effect-label">Items</span>
+          <select value={effects.itemChange ?? ''} aria-label="Item change" onChange={(e) => update({ itemChange: (e.target.value || undefined) as ItemChange | undefined })}>
+            <option value="">Doesn’t touch items</option>
+            {(Object.keys(ITEM_CHANGE_LABELS) as ItemChange[]).map((k) => <option key={k} value={k}>{ITEM_CHANGE_LABELS[k]}</option>)}
+          </select>
+          {!isStatus && (
+            <label className="check-label">
+              <input type="checkbox" checked={!!effects.itemBoost} onChange={(e) => update({ itemBoost: e.target.checked || undefined })} />
+              ×1.5 power if the target holds an item
+            </label>
+          )}
+        </div>
+        <ChargeEditor effects={effects} update={update} isStatus={isStatus} />
         {isProtect && <ProtectEditor effects={effects} update={update} />}
       </div>
     </details>
@@ -362,6 +390,64 @@ function AbilityChangeEditor({ value, onChange }: { value: MoveEffects['targetAb
       </select>
       {saved.abilities.length === 0 && <span className="muted hint">Save a custom ability to hand it out with a move.</span>}
     </div>
+  );
+}
+
+function ChargeEditor({ effects, update, isStatus }: { effects: MoveEffects; update: (p: Partial<MoveEffects>) => void; isStatus: boolean }) {
+  const c = effects.charge;
+  const setC = (patch: Partial<NonNullable<MoveEffects['charge']>>) => {
+    const next = { ...c, ...patch };
+    for (const k of Object.keys(next) as (keyof typeof next)[]) if (!next[k]) delete next[k];
+    update({ charge: next });
+  };
+  const boosts = c?.boosts ?? {};
+  return (
+    <>
+      <div className="effect-row">
+        <span className="effect-label">Two turns</span>
+        <select
+          value={c ? 'charge' : effects.recharge ? 'recharge' : ''} aria-label="Two-turn move"
+          onChange={(e) => update({
+            charge: e.target.value === 'charge' ? c ?? {} : undefined,
+            recharge: e.target.value === 'recharge' || undefined,
+          })}
+        >
+          <option value="">Acts in one turn</option>
+          <option value="charge">Charges on turn 1, attacks on turn 2 (Solar Beam)</option>
+          {!isStatus && <option value="recharge">Attacks, then must recharge next turn (Hyper Beam)</option>}
+        </select>
+        {c && (
+          <>
+            <select value={c.hide ?? ''} aria-label="Where the user hides while charging" onChange={(e) => setC({ hide: (e.target.value || undefined) as Hidden | undefined })}>
+              <option value="">Stays in view while charging</option>
+              {HIDDEN_STATES.map((h) => <option key={h} value={h}>Hides {HIDDEN_LABELS[h]}</option>)}
+            </select>
+            <select value={c.skipIn ?? ''} aria-label="Weather that skips the charge" onChange={(e) => setC({ skipIn: (e.target.value || undefined) as Weather | undefined })}>
+              <option value="">Always charges</option>
+              {WEATHERS.map((w) => <option key={w} value={w}>No charge in {WEATHER_LABELS[w].toLowerCase()}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+      {c && (
+        <div className="effect-row boosts">
+          <span className="effect-label">Stats while charging</span>
+          {BOOSTABLE_STATS.map((k) => (
+            <label key={k} className="boost" title={BOOST_LABELS[k]}>
+              {k === 'accuracy' ? 'Acc' : k === 'evasion' ? 'Eva' : k.toUpperCase()}
+              <StageSelect
+                value={boosts[k] ?? 0} label={`Charging: ${BOOST_LABELS[k]}`}
+                onChange={(n) => {
+                  const next = { ...boosts, [k]: n };
+                  if (!n) delete next[k];
+                  setC({ boosts: Object.keys(next).length ? next : undefined });
+                }}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </>
   );
 }
 

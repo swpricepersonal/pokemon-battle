@@ -2,11 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { abilityName } from '../engine/abilities';
 import {
   STRUGGLE_INDEX, SWITCH_INDEX, activeWeather, allMons, allyOf, availableChoices, benchOptions, defaultTarget, effectiveMove,
-  effectiveSpeed, fieldDamageOpts, foesOf, getChoiceMove, isAlive, monAt, moveNeedsTarget, oneOnOne, replacementKey, validTargets,
+  effectiveSpeed, fieldDamageOpts, foesOf, getChoiceMove, isAlive, lockedReason, monAt, moveNeedsTarget, oneOnOne, replacementKey,
+  validTargets,
 } from '../engine/battle';
 import type { Action, BattleState, LogEntry, MoveChoice, Side, TargetRef, TurnChoices } from '../engine/battle';
 import { damageRange, typeEffectiveness, typesOf } from '../engine/damage';
-import { BOOSTABLE_STATS, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, HAZARD_MAX, STATUS_LABELS, TERRAIN_LABELS, WEATHER_LABELS } from '../engine/types';
+import { BOOSTABLE_STATS, CUSTOM_ABILITY, HAZARDS, HIDDEN_LABELS, HAZARD_LABELS, HAZARD_MAX, STATUS_LABELS, TERRAIN_LABELS, WEATHER_LABELS } from '../engine/types';
 import type { BattlePokemon, Move } from '../engine/types';
 import { NumField, StatusBadge, TYPE_COLORS, TypeBadge } from './common';
 
@@ -39,7 +40,8 @@ export function BattleView({
 
   const over = battle.winner !== null;
   const pending = !over && battle.pendingReplacements.length > 0;
-  const actors = allMons(battle).filter(isAlive);
+  // Pokémon finishing a two-turn move or recharging have no choice to make.
+  const actors = allMons(battle).filter((m) => isAlive(m) && !lockedReason(m));
   const ready = actors.every((m) => choices[m.uid] !== undefined);
   const doubles = battle.format === 'doubles';
   const titled = !oneOnOne(battle);
@@ -90,7 +92,8 @@ export function BattleView({
                       onPick={(i) => setPicks((p) => ({ ...p, [replacementKey(ref)]: i }))}
                     />
                   )}
-                  {!over && !pending && isAlive(mon) && (
+                  {!over && !pending && isAlive(mon) && lockedReason(mon) && <div className="locked-note">{lockedReason(mon)}</div>}
+                  {!over && !pending && isAlive(mon) && !lockedReason(mon) && (
                     <MovePicker
                       battle={battle}
                       mon={mon}
@@ -222,11 +225,13 @@ function MonCard({ battle, mon, slot, onSetHp }: { battle: BattleState; mon: Bat
       </div>
       <div className="types-line">
         {typesOf(mon).map((t) => <TypeBadge key={t} type={t} small />)}
-        {(ability || heldItem || abilityChanged) && (
+        {(ability || heldItem || mon.item || abilityChanged) && (
           <span className="mon-ability muted">
             {ability || (abilityChanged ? 'No ability' : '')}{abilityChanged && <em title={`Originally ${mon.build.ability === CUSTOM_ABILITY ? mon.build.customAbility?.name : mon.build.ability || 'none'}`}> (changed)</em>}
-            {(ability || abilityChanged) && heldItem && ' · '}
-            {heldItem && (!mon.item ? <s title="Used up">{heldItem}</s> : mon.itemsSuppressed ? <s title="No effect in Magic Room">{heldItem}</s> : heldItem)}
+            {(ability || abilityChanged) && (heldItem || mon.item) && ' · '}
+            {mon.item
+              ? mon.itemsSuppressed ? <s title="No effect in Magic Room">{mon.item}</s> : <>{mon.item}{mon.item !== heldItem && <em> (new)</em>}</>
+              : heldItem && <s title="Used up or lost">{heldItem}</s>}
           </span>
         )}
       </div>
@@ -245,7 +250,7 @@ function MonCard({ battle, mon, slot, onSetHp }: { battle: BattleState; mon: Bat
         {speed !== mon.stats.spe && <> (effective {speed})</>}
       </div>
       {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0 || mon.substituteHp > 0 || mon.taunt > 0 || mon.encore || mon.leechSeed
-        || mon.disable || mon.torment || mon.yawn > 0 || mon.perishCount > 0 || mon.healBlock > 0) && (
+        || mon.disable || mon.torment || mon.yawn > 0 || mon.perishCount > 0 || mon.healBlock > 0 || mon.charging || mon.mustRecharge) && (
         <div className="chips">
           {mon.status && (
             <span className="chip">
@@ -255,6 +260,12 @@ function MonCard({ battle, mon, slot, onSetHp }: { battle: BattleState; mon: Bat
             </span>
           )}
           {mon.confusion > 0 && <span className="chip">Confused</span>}
+          {mon.charging && (
+            <span className="chip">
+              Charging {mon.build.moves[mon.charging.move]?.name}{mon.charging.hide ? ` · ${HIDDEN_LABELS[mon.charging.hide].split(' (')[0]}` : ''}
+            </span>
+          )}
+          {mon.mustRecharge && <span className="chip down">Must recharge</span>}
           {mon.substituteHp > 0 && <span className="chip">Substitute · {mon.substituteHp} HP</span>}
           {mon.taunt > 0 && <span className="chip">Taunted · {mon.taunt} turn{mon.taunt === 1 ? '' : 's'}</span>}
           {mon.healBlock > 0 && <span className="chip down">Heal Block · {mon.healBlock} turn{mon.healBlock === 1 ? '' : 's'}</span>}

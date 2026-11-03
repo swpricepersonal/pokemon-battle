@@ -6,7 +6,7 @@ export function defaultMoveTarget(category: MoveCategory, effects: MoveEffects):
   if (category !== 'Status') return 'normal';
   if (effects.hazard) return 'field';
   const e = effects;
-  return e.status || e.targetBoosts || e.confuse || e.healBlock || e.typeChange || e.targetAbility || e.forceSwitch ? 'normal' : 'self';
+  return e.status || e.targetBoosts || e.confuse || e.healBlock || e.typeChange || e.targetAbility || e.forceSwitch || e.itemChange ? 'normal' : 'self';
 }
 
 /** Move flags by name, so library entries stay one line each. */
@@ -17,7 +17,8 @@ const FLAG_LISTS: Record<MoveFlag, string[]> = {
     'Ice Punch', 'Close Combat', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Seismic Toss', 'Poison Jab', 'High Horsepower',
     'Brave Bird', 'Dual Wingbeat', 'Zen Headbutt', 'X-Scissor', 'Shadow Sneak', 'Dragon Claw', 'Crunch', 'Iron Head',
     'Bullet Punch', 'Play Rough', 'U-turn', 'Flip Turn', 'Dragon Tail', 'Circle Throw', 'Rapid Spin', 'Stone Axe',
-    'Ceaseless Edge',
+    'Ceaseless Edge', 'Solar Blade', 'Fly', 'Bounce', 'Dig', 'Dive', 'Phantom Force', 'Skull Bash', 'Giga Impact', 'Knock Off',
+    'Thief', 'Covet',
   ],
   punch: ['Fire Punch', 'Thunder Punch', 'Ice Punch', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Bullet Punch'],
   bite: ['Crunch'],
@@ -254,6 +255,28 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Ceaseless Edge', 'Dark', 'Physical', 65, 90, 15, { highCrit: true, effects: { hazard: 'spikes' } }),
   mv('Rapid Spin', 'Normal', 'Physical', 50, 100, 40, { effects: { clearHazards: 'own', selfBoosts: { boosts: { spe: 1 }, chance: 100 } } }),
   mv('Defog', 'Flying', 'Status', 0, null, 15, { effects: { clearHazards: 'both', targetBoosts: { boosts: { evasion: -1 }, chance: 100 } } }),
+  // Two-turn and recharge moves
+  mv('Solar Beam', 'Grass', 'Special', 120, 100, 10, { effects: { charge: { skipIn: 'sun' } } }),
+  mv('Solar Blade', 'Grass', 'Physical', 125, 100, 10, { effects: { charge: { skipIn: 'sun' } } }),
+  mv('Fly', 'Flying', 'Physical', 90, 95, 15, { effects: { charge: { hide: 'air' } } }),
+  mv('Bounce', 'Flying', 'Physical', 85, 85, 5, { effects: { charge: { hide: 'air' }, status: { status: 'par', chance: 30 } } }),
+  mv('Dig', 'Ground', 'Physical', 80, 100, 10, { effects: { charge: { hide: 'underground' } } }),
+  mv('Dive', 'Water', 'Physical', 80, 100, 10, { effects: { charge: { hide: 'underwater' } } }),
+  mv('Phantom Force', 'Ghost', 'Physical', 90, 100, 10, { effects: { charge: { hide: 'vanished' } } }),
+  mv('Sky Attack', 'Flying', 'Physical', 140, 90, 5, { highCrit: true, effects: { charge: {}, flinch: 30 } }),
+  mv('Skull Bash', 'Normal', 'Physical', 130, 100, 10, { effects: { charge: { boosts: { def: 1 } } } }),
+  mv('Meteor Beam', 'Rock', 'Special', 120, 90, 10, { effects: { charge: { boosts: { spa: 1 } } } }),
+  mv('Electro Shot', 'Electric', 'Special', 130, 100, 10, { effects: { charge: { skipIn: 'rain', boosts: { spa: 1 } } } }),
+  mv('Hyper Beam', 'Normal', 'Special', 150, 90, 5, { effects: { recharge: true } }),
+  mv('Giga Impact', 'Normal', 'Physical', 150, 90, 5, { effects: { recharge: true } }),
+  // Item-changing moves
+  mv('Knock Off', 'Dark', 'Physical', 65, 100, 20, { effects: { itemChange: 'remove', itemBoost: true } }),
+  mv('Thief', 'Dark', 'Physical', 60, 100, 25, { effects: { itemChange: 'steal' } }),
+  mv('Covet', 'Normal', 'Physical', 60, 100, 25, { effects: { itemChange: 'steal' } }),
+  mv('Trick', 'Psychic', 'Status', 0, 100, 10, { effects: { itemChange: 'swap' } }),
+  mv('Switcheroo', 'Dark', 'Status', 0, 100, 10, { effects: { itemChange: 'swap' } }),
+  mv('Bestow', 'Normal', 'Status', 0, null, 15, { effects: { itemChange: 'give' } }),
+  mv('Corrosive Gas', 'Poison', 'Status', 0, 100, 40, { ...ALL, effects: { itemChange: 'remove' } }),
 ];
 
 export function findMove(name: string): Move {

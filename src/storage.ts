@@ -4,10 +4,10 @@ import { MOVE_LIBRARY, PRESET_BUILDS, blankBuild, defaultMoveTarget, newId } fro
 import { MAX_TEAM } from './engine/battle';
 import type { BattleState } from './engine/battle';
 import {
-  BOOSTABLE_STATS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS, MOVE_TARGETS, NATURE_NAMES,
+  BOOSTABLE_STATS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HIDDEN_STATES, ITEM_CHANGES, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS, MOVE_TARGETS, NATURE_NAMES,
   STAT_KEYS, SWAP_ABILITIES, TERRAINS, TYPES, WEATHERS,
 } from './engine/types';
-import type { Boosts, CustomAbility, Format, MajorStatus, Move, MoveEffects, PokemonBuild, Terrain, TypeName, Weather } from './engine/types';
+import type { Boosts, CustomAbility, Format, Hidden, MajorStatus, Move, MoveEffects, PokemonBuild, Terrain, TypeName, Weather } from './engine/types';
 
 const LIBRARY_KEY = 'battle-sim:library';
 const SIDES_KEY = 'battle-sim:sides';
@@ -233,6 +233,18 @@ function normalizeEffects(raw: unknown): Move['effects'] {
   if (effects.clearHazards !== undefined && effects.clearHazards !== 'own' && effects.clearHazards !== 'both') delete effects.clearHazards;
   if (effects.selfSwitch !== undefined && effects.selfSwitch !== 'switch' && effects.selfSwitch !== 'batonPass') delete effects.selfSwitch;
   if (effects.forceSwitch !== undefined && effects.forceSwitch !== true) delete effects.forceSwitch;
+  if (effects.charge) {
+    const c = (typeof effects.charge === 'object' ? effects.charge : {}) as Record<string, unknown>;
+    const b = boosts(c.boosts);
+    effects.charge = {
+      ...(HIDDEN_STATES.includes(c.hide as never) ? { hide: c.hide as Hidden } : {}),
+      ...(WEATHERS.includes(c.skipIn as never) ? { skipIn: c.skipIn as Weather } : {}),
+      ...(Object.keys(b).length ? { boosts: b } : {}),
+    };
+  }
+  if (effects.recharge !== undefined && effects.recharge !== true) delete effects.recharge;
+  if (effects.itemChange !== undefined && !ITEM_CHANGES.includes(effects.itemChange)) delete effects.itemChange;
+  if (effects.itemBoost !== undefined && effects.itemBoost !== true) delete effects.itemBoost;
   if (effects.status && !MAJOR_STATUSES.includes(effects.status.status)) delete effects.status;
   if (effects.multiHit) {
     const [a, b] = Array.isArray(effects.multiHit) ? effects.multiHit : [];

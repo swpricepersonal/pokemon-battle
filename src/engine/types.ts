@@ -74,7 +74,28 @@ export interface MoveEffects {
   selfSwitch?: 'switch' | 'batonPass';
   /** The target is dragged out and replaced by a random team member (Roar, Dragon Tail). */
   forceSwitch?: boolean;
+  /**
+   * Two-turn move: the first turn charges (raising `boosts`, and hiding the user if `hide` is set), the second attacks.
+   * In `skipIn` weather it attacks at once (Solar Beam in sun, which is also halved in rain, sand and snow).
+   */
+  charge?: { hide?: Hidden; skipIn?: Weather; boosts?: Partial<Boosts> };
+  /** The user must spend the next turn recharging if the move hits (Hyper Beam). */
+  recharge?: boolean;
+  /** Takes the target's item ('remove', Knock Off), takes it for the user ('steal', Thief), trades items ('swap', Trick) or gives the user's ('give', Bestow). */
+  itemChange?: ItemChange;
+  /** ×1.5 power if the target holds an item (Knock Off). */
+  itemBoost?: boolean;
 }
+
+export const ITEM_CHANGES = ['remove', 'steal', 'swap', 'give'] as const;
+export type ItemChange = (typeof ITEM_CHANGES)[number];
+
+/** Where a two-turn move hides its user on the charging turn (Fly, Dig, Dive, Phantom Force). */
+export const HIDDEN_STATES = ['air', 'underground', 'underwater', 'vanished'] as const;
+export type Hidden = (typeof HIDDEN_STATES)[number];
+export const HIDDEN_LABELS: Record<Hidden, string> = {
+  air: 'up high (Fly)', underground: 'underground (Dig)', underwater: 'underwater (Dive)', vanished: 'vanished (Phantom Force)',
+};
 
 export const HAZARDS = ['stealthRock', 'spikes', 'toxicSpikes', 'stickyWeb'] as const;
 export type Hazard = (typeof HAZARDS)[number];
@@ -330,6 +351,10 @@ export interface BattlePokemon {
   yawn: number;
   /** Perish Song count (0 = none); faints when it reaches 0 from 1. */
   perishCount: number;
+  /** Charging a two-turn move: the slot, its target, and where it's hiding. */
+  charging: { move: number; target?: { side: Side; slot: number }; hide?: Hidden } | null;
+  /** Must skip its next turn after Hyper Beam. */
+  mustRecharge: boolean;
   /** The last move this Pokémon used (for Instruct, Encore, Disable and Torment). */
   lastAction: { move: number; target?: { side: Side; slot: number } } | null;
   vol: TurnVolatiles;

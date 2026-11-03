@@ -37,6 +37,8 @@ export interface ItemDef {
   extendsTerrain?: boolean;
   /** Unaffected by entry hazards. */
   hazardImmune?: boolean;
+  /** Skips a two-turn move's charging turn once, then is used up. */
+  powerHerb?: boolean;
 }
 
 const TYPE_BOOSTERS: [string, TypeName][] = [
@@ -65,6 +67,7 @@ export const ITEMS: Record<string, ItemDef> = {
   'Wise Glasses': { group: 'Power', desc: 'Special moves ×1.1 power.', basePower: (c) => (c.move.category === 'Special' ? 1.1 : 1) },
   'Assault Vest': { group: 'Defense', desc: 'Sp. Def ×1.5, but can’t use status moves.', noStatusMoves: true, defense: (c) => (c.move.category === 'Special' ? 1.5 : 1) },
   Eviolite: { group: 'Defense', desc: 'Defense and Sp. Def ×1.5 (for Pokémon that can still evolve).', defense: () => 1.5 },
+  'Power Herb': { group: 'Power', desc: 'The holder’s two-turn move (Solar Beam, Fly...) attacks right away, once. Then it is used up.', powerHerb: true },
   'Heavy-Duty Boots': { group: 'Defense', desc: 'Unaffected by entry hazards (Stealth Rock, Spikes, Toxic Spikes, Sticky Web).', hazardImmune: true },
   'Focus Sash': { group: 'Defense', desc: 'Survives one hit from full HP with 1 HP, then is used up.', focusSash: true },
   Leftovers: { group: 'Recovery', desc: 'Heals 1/16 max HP at the end of each turn.', endOfTurnHp: () => 1 / 16 },

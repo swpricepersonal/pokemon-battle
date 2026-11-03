@@ -7,8 +7,8 @@ import { accuracyStageMultiplier, calcAllStats, clampStage, stageMultiplier } fr
 import { typeMultiplier } from './typeChart';
 import { BOOST_LABELS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, HAZARD_MAX, SWAP_ABILITIES, typesOf } from './types';
 import type {
-  BattlePokemon, BoostableStat, Boosts, CustomAbility, Format, Hazard, MajorStatus, Move, MoveEffects, PokemonBuild, Side, Terrain,
-  TurnVolatiles, TypeName, Weather,
+  BattlePokemon, BoostableStat, Boosts, CustomAbility, Format, Hazard, Hidden, ItemChange, MajorStatus, Move, MoveEffects, PokemonBuild,
+  Side, Terrain, TurnVolatiles, TypeName, Weather,
 } from './types';
 import { TERRAIN_LABELS, WEATHER_LABELS } from './types';
 import type { AbilityDef, ImmunityResult } from './abilities';
@@ -168,6 +168,8 @@ export function createBattlePokemon(build: PokemonBuild, side: Side = 0, teamInd
     torment: false,
     yawn: 0,
     perishCount: 0,
+    charging: null,
+    mustRecharge: false,
     vol: freshVolatiles(),
   };
 }
@@ -275,8 +277,19 @@ function isHealingMove(m: Move): boolean {
   return m.category === 'Status' && !!m.effects.heal;
 }
 
+/**
+ * Why the Pokémon has no choice this turn (finishing a two-turn move, or recharging), or null.
+ * The engine picks its action itself.
+ */
+export function lockedReason(mon: BattlePokemon): string | null {
+  if (mon.mustRecharge) return `${mon.name} must recharge this turn.`;
+  if (mon.charging) return `${mon.name} will finish ${mon.build.moves[mon.charging.move]?.name ?? 'its move'} this turn.`;
+  return null;
+}
+
 /** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
 export function availableChoices(mon: BattlePokemon): MoveChoice[] {
+  if (mon.charging && mon.build.moves[mon.charging.move]) return [mon.charging.move];
   const item = getItem(mon);
   const enc = mon.encore;
   if (enc && mon.pp[enc.move] > 0 && mon.build.moves[enc.move]) return moveBlocked(mon, enc.move) ? [STRUGGLE_INDEX] : [enc.move];
@@ -331,10 +344,12 @@ const WEATHER_BALL_TYPE: Record<Weather, TypeName> = { sun: 'Fire', rain: 'Water
 
 /** The move as it will actually be used (Weather Ball changes type and power with the weather). */
 export function effectiveMove(state: BattleState, move: Move): Move {
+  const w = activeWeather(state);
   if (move.special === 'weatherBall') {
-    const w = activeWeather(state);
     if (w) return { ...move, type: WEATHER_BALL_TYPE[w], power: move.power * 2 };
   }
+  // Sunlight-charged moves (Solar Beam) are halved in other weather.
+  if (move.effects.charge?.skipIn === 'sun' && w && w !== 'sun') return { ...move, power: Math.floor(move.power / 2) };
   return move;
 }
 
@@ -399,7 +414,7 @@ const PROTECT_MOVES = new Set(['protect', 'wideGuard', 'quickGuard']);
 /** Effects handled by the generic move code (so a special move with any of these still runs it). */
 function hasExtraEffects(e: MoveEffects): boolean {
   return !!(e.status || e.targetBoosts || e.selfBoosts || e.heal || e.confuse || e.healBlock || e.typeChange
-    || e.targetAbility || e.hazard || e.clearHazards || e.selfSwitch || e.forceSwitch);
+    || e.targetAbility || e.hazard || e.clearHazards || e.selfSwitch || e.forceSwitch || e.itemChange);
 }
 
 /** What Baton Pass hands to the incoming Pokémon. */
@@ -416,6 +431,18 @@ const HAZARD_SET_TEXT: Record<Hazard, string> = {
   spikes: 'Spikes were scattered on the ground all around',
   toxicSpikes: 'Poison spikes were scattered on the ground all around',
   stickyWeb: 'A sticky web has been laid out on the ground around',
+};
+
+/** Moves that can hit a Pokémon hiding in each place, and whether they do double damage. */
+const HITS_HIDDEN: Record<Hidden, Record<string, number>> = {
+  air: { Thunder: 1, Hurricane: 1, 'Sky Uppercut': 1, Gust: 2, Twister: 2, 'Smack Down': 1, 'Thousand Arrows': 1 },
+  underground: { Earthquake: 2, Magnitude: 2, Fissure: 1 },
+  underwater: { Surf: 2, Whirlpool: 2 },
+  vanished: {},
+};
+
+const CHARGE_TEXT: Record<Hidden, string> = {
+  air: 'flew up high!', underground: 'burrowed its way under the ground!', underwater: 'hid underwater!', vanished: 'vanished instantly!',
 };
 
 const ROOM_TEXT = {
@@ -518,7 +545,7 @@ class TurnRunner {
       boosts: { ...ZERO_BOOSTS }, confusion: 0, taunt: 0, encore: null, substituteHp: 0, leechSeed: null, disable: null,
       torment: false, yawn: 0, perishCount: 0, lastAction: null, choiceLock: null, protectStreak: 0, flashFire: false,
       turnsActive: 0, toxicCounter: 0, healBlock: 0, ability: mon.build.ability, customAbility: mon.build.customAbility,
-      types: buildTypes(mon.build), addedType: null, vol: freshVolatiles(),
+      types: buildTypes(mon.build), addedType: null, charging: null, mustRecharge: false, vol: freshVolatiles(),
     });
     return passed;
   }
@@ -892,6 +919,15 @@ class TurnRunner {
     for (const mon of allMons(this.s)) {
       if (!isAlive(mon)) continue;
       let action = choices[mon.uid];
+      if (mon.mustRecharge) {
+        this.queue.push({ mon, action: { move: STRUGGLE_INDEX }, move: STRUGGLE, priority: 0, tiebreak: this.rng.next() });
+        continue;
+      }
+      if (mon.charging && mon.build.moves[mon.charging.move]) {
+        const move = mon.build.moves[mon.charging.move]!;
+        this.queue.push({ mon, action: { move: mon.charging.move, target: mon.charging.target }, move, priority: movePriority(mon, move), tiebreak: this.rng.next() });
+        continue;
+      }
       if (action?.switchTo !== undefined && this.bench(mon.side).includes(action.switchTo)) {
         this.queue.push({ mon, action, move: STRUGGLE, priority: SWITCH_PRIORITY, tiebreak: this.rng.next(), switchTo: action.switchTo });
         continue;
@@ -1026,6 +1062,14 @@ class TurnRunner {
     const user = entry.mon;
     if (!isAlive(user) || !this.isActive(user)) return;
     user.vol.moved = true;
+    if (user.mustRecharge && !instructed) {
+      user.mustRecharge = false;
+      this.log('info', `${user.name} must recharge!`, user.side);
+      return;
+    }
+    // The second turn of a two-turn move: no PP is spent, and anything that stops it cancels the move.
+    const charged = !!user.charging && !instructed && entry.action.move === user.charging.move;
+    if (user.charging && !instructed) user.charging = null;
 
     // An Encore that started earlier this turn replaces the chosen move.
     const enc = user.encore;
@@ -1067,12 +1111,13 @@ class TurnRunner {
     }
     if (struggle) {
       this.log('info', `${user.name} has no moves left!`, user.side);
-    } else {
+    } else if (!charged) {
       user.pp[action.move] = Math.max(0, user.pp[action.move] - 1);
       if (getItem(user)?.choice && user.choiceLock === null) user.choiceLock = action.move;
       user.lastAction = { move: action.move, target: action.target };
     }
     const move = effectiveMove(this.s, entry.move);
+    if (move.effects.charge && !charged && !this.startCharge(user, move, action)) return;
     this.log('move', `${user.name} used ${move.name}!`, user.side);
 
     const sp = move.special;
@@ -1120,7 +1165,14 @@ class TurnRunner {
 
     for (const t of targets) {
       if (!isAlive(t)) continue;
+      let hitMove = move;
       if (t !== user) {
+        const hiddenMult = this.hiddenMultiplier(user, t, move);
+        if (hiddenMult === 0) {
+          this.log('info', `${t.name} avoided the attack!`, t.side);
+          continue;
+        }
+        if (hiddenMult !== 1) hitMove = { ...move, power: move.power * hiddenMult };
         if (this.blocked(t, move, entry)) continue;
         if (!this.accuracyHit(user, t, move)) {
           this.log('info', `${t.name} avoided the attack!`, t.side);
@@ -1134,7 +1186,7 @@ class TurnRunner {
         continue;
       }
       if (damaging) {
-        const dealt = this.hit(user, t, move, struggle, spread, sheerForce);
+        const dealt = this.hit(user, t, hitMove, struggle, spread, sheerForce);
         if (dealt !== null) {
           anyHit = true;
           totalDealt += dealt;
@@ -1164,6 +1216,7 @@ class TurnRunner {
       const chance = e.selfBoosts.chance * (aAb?.sereneGrace ? 2 : 1);
       if (chanceHit(chance, this.rng)) this.applyBoosts(user, e.selfBoosts.boosts, null);
     }
+    if (anyHit && e.recharge && isAlive(user)) user.mustRecharge = true;
     if (anyHit && e.hazard) this.layHazard(user, e.hazard, !damaging);
     if (anyHit && e.clearHazards && isAlive(user)) this.clearHazards(user, e.clearHazards);
     if (anyHit && e.selfSwitch && isAlive(user) && this.isActive(user) && this.s.winner === null) {
@@ -1178,6 +1231,89 @@ class TurnRunner {
   failed(): false {
     this.fail();
     return false;
+  }
+
+  /**
+   * First turn of a two-turn move. Returns true if the move should go ahead right away
+   * (its weather is up, or a Power Herb was used); otherwise the user starts charging.
+   */
+  startCharge(user: BattlePokemon, move: Move, action: Action): boolean {
+    const c = move.effects.charge!;
+    const hide = c.hide;
+    this.log('move', hide ? `${user.name} ${CHARGE_TEXT[hide]}` : c.skipIn === 'sun' ? `${user.name} absorbed light!` : `${user.name} is charging up ${move.name}!`, user.side);
+    if (c.boosts) this.applyBoosts(user, c.boosts, null);
+    if (c.skipIn && this.weather === c.skipIn) return true;
+    if (getItem(user)?.powerHerb) {
+      this.log('info', `${user.name} became fully charged due to its ${user.item}!`, user.side);
+      user.item = '';
+      return true;
+    }
+    user.charging = { move: action.move, ...(action.target ? { target: action.target } : {}), ...(hide ? { hide } : {}) };
+    return false;
+  }
+
+  /** Is `t` out of reach (Fly, Dig...) for this move? Returns the damage multiplier if it can be hit, or 0. */
+  hiddenMultiplier(user: BattlePokemon, t: BattlePokemon, move: Move): number {
+    const hide = t.charging?.hide;
+    if (!hide || t === user || t.side === user.side) return 1;
+    if (getAbility(user)?.noGuard || getAbility(t)?.noGuard) return 1;
+    return HITS_HIDDEN[hide][move.name] ?? 0;
+  }
+
+  /** Knock Off, Thief, Trick, Bestow. Returns true if items changed hands. */
+  changeItem(user: BattlePokemon, t: BattlePokemon, mode: ItemChange, announceFail: boolean): boolean {
+    const no = () => {
+      if (announceFail) this.fail();
+      return false;
+    };
+    if (t === user || !isAlive(t)) return no();
+    const unlock = (m: BattlePokemon) => { m.choiceLock = null; };
+    switch (mode) {
+      case 'remove': {
+        if (!t.item) return no();
+        this.log('info', `${user.name} knocked off ${t.name}'s ${t.item}!`, t.side);
+        t.item = '';
+        unlock(t);
+        return true;
+      }
+      case 'steal': {
+        if (!t.item || user.item) return no();
+        this.log('info', `${user.name} stole ${t.name}'s ${t.item}!`, user.side);
+        user.item = t.item;
+        t.item = '';
+        unlock(t);
+        unlock(user);
+        this.checkPinchBerry(user);
+        this.checkLum(user);
+        return true;
+      }
+      case 'swap': {
+        if (!t.item && !user.item) return no();
+        const mine = user.item;
+        user.item = t.item;
+        t.item = mine;
+        this.log('info', `${user.name} switched items with ${t.name}!`, user.side);
+        if (user.item) this.log('info', `${user.name} obtained ${user.item}.`, user.side);
+        if (t.item) this.log('info', `${t.name} obtained ${t.item}.`, t.side);
+        unlock(user);
+        unlock(t);
+        for (const m of [user, t]) {
+          this.checkPinchBerry(m);
+          this.checkLum(m);
+        }
+        return true;
+      }
+      case 'give': {
+        if (!user.item || t.item) return no();
+        this.log('info', `${t.name} received ${user.item} from ${user.name}!`, t.side);
+        t.item = user.item;
+        user.item = '';
+        unlock(user);
+        this.checkPinchBerry(t);
+        this.checkLum(t);
+        return true;
+      }
+    }
   }
 
   /** Specials that act on the user, its side or the field. Returns undefined if `sp` isn't one, else whether it worked. */
@@ -1347,6 +1483,10 @@ class TurnRunner {
     const user = entry.mon;
     const tSide = this.s.sides[t.side];
     if (move.target === 'ally' || move.target === 'selfAndAlly') return false;
+    if (t.vol.protect && move.effects.charge?.hide === 'vanished') {
+      t.vol.protect = null;
+      this.log('info', `It broke through ${t.name}'s protection!`, t.side);
+    }
     if (t.vol.protect && !(t.vol.protect.attacksOnly && move.category === 'Status')) {
       this.log('info', `${t.name} protected itself!`, t.side);
       this.protectContactEffects(user, t, move);
@@ -1568,6 +1708,7 @@ class TurnRunner {
       const e = move.effects;
       if (e.typeChange) this.changeType(t, e.typeChange);
       if (e.targetAbility) this.changeAbility(user, t, e.targetAbility);
+      if (e.itemChange) this.changeItem(user, t, e.itemChange, false);
       if (e.forceSwitch) this.dragOut(t, false);
     }
     return total;
@@ -1686,6 +1827,10 @@ class TurnRunner {
     }
     if (e.targetAbility) {
       this.changeAbility(user, t, e.targetAbility);
+      acted = true;
+    }
+    if (e.itemChange) {
+      this.changeItem(user, t, e.itemChange, true);
       acted = true;
     }
     if (e.forceSwitch) {
@@ -1870,6 +2015,8 @@ export function setMonHp(state: BattleState, uid: string, hp: number, rng: Rng =
   if (wasFainted && value > 0) {
     mon.faintLogged = false;
     mon.status = null;
+    mon.charging = null;
+    mon.mustRecharge = false;
   }
   s.log.push({ turn: s.turn, kind: 'info', side: mon.side, text: `${mon.name}'s HP was set to ${value}/${mon.stats.hp} (${pct(value, mon.stats.hp)}).` });
   const runner = new TurnRunner(s, rng);

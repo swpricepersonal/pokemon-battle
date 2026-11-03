@@ -130,6 +130,7 @@ export function calcDamage(
     opts.helpingHand ? ['Helping Hand', 1.5] : null,
     dAb?.defenderBasePower && [`${defender.name}'s ${dName}`, dAb.defenderBasePower(ctx)],
     aItem?.basePower && [attacker.item, aItem.basePower(ctx)],
+    move.effects.itemBoost && defender.item ? [`${defender.name} holds an item`, 1.5] : null,
     terrain && terrain !== 'misty' && attackerGrounded && move.type === TERRAIN_TYPE[terrain] ? [terrainLabel, 1.3] : null,
     terrain === 'grassy' && defenderGrounded && GRASSY_HALVED.has(move.name) ? [terrainLabel, 0.5] : null,
     terrain === 'misty' && defenderGrounded && move.type === 'Dragon' ? [terrainLabel, 0.5] : null,
