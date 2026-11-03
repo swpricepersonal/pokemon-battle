@@ -1,4 +1,5 @@
 import type { DamageCtx } from './abilities';
+import { typesOf } from './types';
 import type { BattlePokemon, TypeName, Weather } from './types';
 
 export interface ItemDef {
@@ -34,6 +35,10 @@ export interface ItemDef {
   extendsWeather?: Weather;
   /** Terrain it sets lasts 8 turns. */
   extendsTerrain?: boolean;
+  /** Unaffected by entry hazards. */
+  hazardImmune?: boolean;
+  /** Skips a two-turn move's charging turn once, then is used up. */
+  powerHerb?: boolean;
 }
 
 const TYPE_BOOSTERS: [string, TypeName][] = [
@@ -62,11 +67,13 @@ export const ITEMS: Record<string, ItemDef> = {
   'Wise Glasses': { group: 'Power', desc: 'Special moves ×1.1 power.', basePower: (c) => (c.move.category === 'Special' ? 1.1 : 1) },
   'Assault Vest': { group: 'Defense', desc: 'Sp. Def ×1.5, but can’t use status moves.', noStatusMoves: true, defense: (c) => (c.move.category === 'Special' ? 1.5 : 1) },
   Eviolite: { group: 'Defense', desc: 'Defense and Sp. Def ×1.5 (for Pokémon that can still evolve).', defense: () => 1.5 },
+  'Power Herb': { group: 'Power', desc: 'The holder’s two-turn move (Solar Beam, Fly...) attacks right away, once. Then it is used up.', powerHerb: true },
+  'Heavy-Duty Boots': { group: 'Defense', desc: 'Unaffected by entry hazards (Stealth Rock, Spikes, Toxic Spikes, Sticky Web).', hazardImmune: true },
   'Focus Sash': { group: 'Defense', desc: 'Survives one hit from full HP with 1 HP, then is used up.', focusSash: true },
   Leftovers: { group: 'Recovery', desc: 'Heals 1/16 max HP at the end of each turn.', endOfTurnHp: () => 1 / 16 },
   'Black Sludge': {
     group: 'Recovery', desc: 'Poison types heal 1/16 max HP each turn; anything else loses 1/8.',
-    endOfTurnHp: (mon) => (mon.build.type1 === 'Poison' || mon.build.type2 === 'Poison' ? 1 / 16 : -1 / 8),
+    endOfTurnHp: (mon) => (typesOf(mon).includes('Poison') ? 1 / 16 : -1 / 8),
   },
   'Sitrus Berry': { group: 'Recovery', desc: 'Heals 25% max HP at half HP or less, then is used up.', pinchHeal: { amount: 0.25 } },
   'Oran Berry': { group: 'Recovery', desc: 'Heals 10 HP at half HP or less, then is used up.', pinchHeal: { amount: 10, flat: true } },
@@ -94,6 +101,7 @@ for (const [name, type] of RESIST_BERRIES) {
 
 export const ITEM_GROUPS: ItemDef['group'][] = ['Choice', 'Power', 'Defense', 'Recovery', 'Contact', 'Field', 'Type boost', 'Resist berry'];
 
+/** The held item's effects, or null if it has none (no item, used up, or Magic Room). */
 export function getItem(mon: BattlePokemon): ItemDef | null {
-  return mon.item ? ITEMS[mon.item] ?? null : null;
+  return mon.item && !mon.itemsSuppressed ? ITEMS[mon.item] ?? null : null;
 }

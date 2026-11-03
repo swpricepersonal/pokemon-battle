@@ -1,19 +1,21 @@
 import { abilityName, defenderAbility, getAbility, hasSecondary, isGrounded } from './abilities';
-import { CRIT_CHANCES, calcDamage, typeEffectiveness, typesOf } from './damage';
+import { CRIT_CHANCES, calcDamage, typeEffectiveness } from './damage';
 import type { DamageBreakdown } from './damage';
 import { getItem } from './items';
 import { applyMod, chainMods } from './modifiers';
 import { accuracyStageMultiplier, calcAllStats, clampStage, stageMultiplier } from './stats';
-import { BOOST_LABELS } from './types';
+import { typeMultiplier } from './typeChart';
+import { BOOST_LABELS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, HAZARD_MAX, SWAP_ABILITIES, typesOf } from './types';
 import type {
-  BattlePokemon, BoostableStat, Boosts, Format, MajorStatus, Move, PokemonBuild, Side, Terrain, TurnVolatiles, TypeName, Weather,
+  BattlePokemon, BoostableStat, Boosts, CustomAbility, Format, Hazard, Hidden, ItemChange, MajorStatus, Move, MoveEffects, PokemonBuild,
+  Side, Terrain, TurnVolatiles, TypeName, Weather,
 } from './types';
 import { TERRAIN_LABELS, WEATHER_LABELS } from './types';
 import type { AbilityDef, ImmunityResult } from './abilities';
 
 export type { Side } from './types';
 
-export type LogKind = 'turn' | 'order' | 'move' | 'info' | 'damage' | 'heal' | 'status' | 'boost' | 'faint' | 'result' | 'field';
+export type LogKind = 'turn' | 'order' | 'move' | 'info' | 'damage' | 'heal' | 'status' | 'boost' | 'faint' | 'result' | 'field' | 'switch';
 
 export interface LogEntry {
   turn: number;
@@ -25,8 +27,12 @@ export interface LogEntry {
 }
 
 export interface SideState {
-  /** Active Pokémon by field position (index = slot). */
+  /** The whole team (up to six), in team order. */
+  team: BattlePokemon[];
+  /** Active Pokémon by field position (index = slot). A fainted Pokémon stays in its slot until replaced. */
   mons: BattlePokemon[];
+  /** Entry hazards on this side (layers). */
+  hazards: Record<Hazard, number>;
   tailwind: number;
   reflect: number;
   lightScreen: number;
@@ -38,6 +44,9 @@ export interface BattleState {
   format: Format;
   sides: [SideState, SideState];
   trickRoom: number;
+  /** Turns of Wonder Room / Magic Room left (0 = none). */
+  wonderRoom: number;
+  magicRoom: number;
   weather: Weather | null;
   /** Turns of weather left; -1 means it lasts the whole battle. */
   weatherTurns: number;
@@ -45,13 +54,20 @@ export interface BattleState {
   /** Turns of terrain left; -1 means it lasts the whole battle. */
   terrainTurns: number;
   turn: number;
-  winner: Side | 'draw' | null;
+  /** 'stopped' when the players ended the battle early. */
+  winner: Side | 'draw' | 'stopped' | null;
   log: LogEntry[];
+  /** Field positions whose Pokémon fainted and must be replaced from the bench before the next turn. */
+  pendingReplacements: TargetRef[];
 }
 
 /** A move slot index (0–3), or STRUGGLE_INDEX when every usable move is out of PP. */
 export type MoveChoice = number;
 export const STRUGGLE_INDEX = -1;
+/** Action.move value for a switch (see Action.switchTo). */
+export const SWITCH_INDEX = -2;
+/** Switching happens before any move. */
+const SWITCH_PRIORITY = 7;
 
 /** A field position. */
 export interface TargetRef {
@@ -59,10 +75,17 @@ export interface TargetRef {
   slot: number;
 }
 
+/** Key for a field position in the picks passed to applyReplacements. */
+export const replacementKey = (ref: TargetRef) => `${ref.side}:${ref.slot}`;
+
 export interface Action {
   move: MoveChoice;
   /** Required for single-target moves in doubles. */
   target?: TargetRef;
+  /** Switch to this team member instead of using a move. */
+  switchTo?: number;
+  /** For moves that switch the user out (U-turn, Baton Pass): the team member to bring in. */
+  pivotTo?: number;
 }
 
 /** Each active Pokémon's action for the turn, keyed by uid. */
@@ -97,16 +120,31 @@ export function seededRng(seed: number): Rng {
 const ZERO_BOOSTS: Boosts = { atk: 0, def: 0, spa: 0, spd: 0, spe: 0, accuracy: 0, evasion: 0 };
 
 function freshVolatiles(): TurnVolatiles {
-  return { moved: false, protected: false, flinched: false, helpingHand: false, centerOfAttention: null };
+  return { moved: false, protect: null, flinched: false, helpingHand: false, centerOfAttention: null };
 }
 
-export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 0, name?: string): BattlePokemon {
+const TEAM_LETTERS = 'abcdef';
+export const MAX_TEAM = 6;
+
+function buildTypes(build: PokemonBuild): TypeName[] {
+  return build.type2 && build.type2 !== build.type1 ? [build.type1, build.type2] : [build.type1];
+}
+
+export function createBattlePokemon(build: PokemonBuild, side: Side = 0, teamIndex = 0, name?: string): BattlePokemon {
   const stats = calcAllStats(build);
+  const own = structuredClone(build);
   return {
-    uid: `p${side + 1}${'ab'[slot]}`,
+    uid: `p${side + 1}${TEAM_LETTERS[teamIndex]}`,
     name: name ?? (build.name.trim() || `Pokémon ${side + 1}`),
     side,
-    build: structuredClone(build),
+    teamIndex,
+    build: own,
+    ability: own.ability,
+    ...(own.customAbility ? { customAbility: own.customAbility } : {}),
+    types: buildTypes(own),
+    addedType: null,
+    healBlock: 0,
+    itemsSuppressed: false,
     stats,
     currentHp: stats.hp,
     status: null,
@@ -130,6 +168,8 @@ export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 
     torment: false,
     yawn: 0,
     perishCount: 0,
+    charging: null,
+    mustRecharge: false,
     vol: freshVolatiles(),
   };
 }
@@ -142,7 +182,12 @@ export interface FieldSetup {
   terrain?: Terrain | null;
 }
 
-/** Create a battle from each side's team (the first 1 or 2 builds are used). */
+const noHazards = (): Record<Hazard, number> => ({ stealthRock: 0, spikes: 0, toxicSpikes: 0, stickyWeb: 0 });
+
+/**
+ * Create a battle from each side's team (up to six builds). The first one (singles) or two (doubles)
+ * start on the field; the rest wait on the bench.
+ */
 export function createBattle(
   teams: [PokemonBuild[], PokemonBuild[]],
   format: Format = 'singles',
@@ -150,22 +195,25 @@ export function createBattle(
   setup: FieldSetup = {},
 ): BattleState {
   const n = activeCount(format);
-  const picked = teams.map((t) => t.slice(0, n)) as [PokemonBuild[], PokemonBuild[]];
-  const raw = picked.flatMap((t, side) => t.map((b, slot) => ({ side, slot, name: b.name.trim() || `Pokémon ${side + 1}${'AB'[slot]}` })));
+  const picked = teams.map((t) => t.slice(0, MAX_TEAM)) as [PokemonBuild[], PokemonBuild[]];
+  const raw = picked.flatMap((t, side) => t.map((b, i) => ({ side, i, name: b.name.trim() || `Pokémon ${side + 1}${TEAM_LETTERS[i].toUpperCase()}` })));
   const counts = new Map<string, number>();
   for (const r of raw) counts.set(r.name, (counts.get(r.name) ?? 0) + 1);
-  const display = (side: number, slot: number) => {
-    const r = raw.find((x) => x.side === side && x.slot === slot)!;
+  const display = (side: number, i: number) => {
+    const r = raw.find((x) => x.side === side && x.i === i)!;
     if (counts.get(r.name)! === 1) return r.name;
     const sameSide = raw.filter((x) => x.side === side && x.name === r.name).length > 1;
-    return `${r.name} (P${side + 1}${sameSide ? 'AB'[slot] : ''})`;
+    return `${r.name} (P${side + 1}${sameSide ? TEAM_LETTERS[i].toUpperCase() : ''})`;
   };
-  const sides = picked.map((team, side) => ({
-    mons: team.map((b, slot) => createBattlePokemon(b, side as Side, slot, display(side, slot))),
-    tailwind: 0, reflect: 0, lightScreen: 0, wideGuard: false, quickGuard: false,
-  })) as [SideState, SideState];
+  const sides = picked.map((builds, side) => {
+    const team = builds.map((b, i) => createBattlePokemon(b, side as Side, i, display(side, i)));
+    return {
+      team, mons: team.slice(0, n), hazards: noHazards(),
+      tailwind: 0, reflect: 0, lightScreen: 0, wideGuard: false, quickGuard: false,
+    };
+  }) as [SideState, SideState];
   const state: BattleState = {
-    format, sides, trickRoom: 0, turn: 0, winner: null, log: [],
+    format, sides, trickRoom: 0, wonderRoom: 0, magicRoom: 0, turn: 0, winner: null, log: [], pendingReplacements: [],
     weather: setup.weather ?? null, weatherTurns: setup.weather ? -1 : 0,
     terrain: setup.terrain ?? null, terrainTurns: setup.terrain ? -1 : 0,
   };
@@ -177,14 +225,30 @@ export function createBattle(
   return state;
 }
 
+/** A singles battle with one Pokémon per side: messages name the Pokémon instead of "Player 1". */
+export function oneOnOne(state: BattleState): boolean {
+  return state.format === 'singles' && state.sides.every((s) => s.team.length === 1);
+}
+
 export function allMons(state: BattleState): BattlePokemon[] {
   return [...state.sides[0].mons, ...state.sides[1].mons];
 }
 
 export const isAlive = (m: BattlePokemon | null | undefined): m is BattlePokemon => !!m && m.currentHp > 0;
 
+/** Finds a Pokémon by uid, on the field or on the bench. */
 export function findMon(state: BattleState, uid: string): BattlePokemon | undefined {
-  return allMons(state).find((m) => m.uid === uid);
+  return [...state.sides[0].team, ...state.sides[1].team].find((m) => m.uid === uid);
+}
+
+export function isActive(state: BattleState, mon: BattlePokemon): boolean {
+  return state.sides[mon.side].mons.includes(mon);
+}
+
+/** Team indices of healthy Pokémon on the bench that can be switched in. */
+export function benchOptions(state: BattleState, side: Side): number[] {
+  const s = state.sides[side];
+  return s.team.flatMap((m, i) => (isAlive(m) && !s.mons.includes(m) ? [i] : []));
 }
 
 export function slotOf(state: BattleState, mon: BattlePokemon): number {
@@ -203,13 +267,29 @@ export function foesOf(state: BattleState, mon: BattlePokemon): BattlePokemon[] 
   return state.sides[mon.side === 0 ? 1 : 0].mons.filter(isAlive);
 }
 
-/** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
 /** Disabled, or the move Torment forbids repeating. */
 function moveBlocked(mon: BattlePokemon, slot: number): boolean {
   return (mon.disable?.move === slot) || (mon.torment && mon.lastAction?.move === slot);
 }
 
+/** Status moves that restore HP can't be used under Heal Block. */
+function isHealingMove(m: Move): boolean {
+  return m.category === 'Status' && !!m.effects.heal;
+}
+
+/**
+ * Why the Pokémon has no choice this turn (finishing a two-turn move, or recharging), or null.
+ * The engine picks its action itself.
+ */
+export function lockedReason(mon: BattlePokemon): string | null {
+  if (mon.mustRecharge) return `${mon.name} must recharge this turn.`;
+  if (mon.charging) return `${mon.name} will finish ${mon.build.moves[mon.charging.move]?.name ?? 'its move'} this turn.`;
+  return null;
+}
+
+/** Move slots that can be selected this turn; [STRUGGLE_INDEX] if none. */
 export function availableChoices(mon: BattlePokemon): MoveChoice[] {
+  if (mon.charging && mon.build.moves[mon.charging.move]) return [mon.charging.move];
   const item = getItem(mon);
   const enc = mon.encore;
   if (enc && mon.pp[enc.move] > 0 && mon.build.moves[enc.move]) return moveBlocked(mon, enc.move) ? [STRUGGLE_INDEX] : [enc.move];
@@ -218,6 +298,7 @@ export function availableChoices(mon: BattlePokemon): MoveChoice[] {
     if (mon.choiceLock !== null && mon.choiceLock !== i) return [];
     if (item?.noStatusMoves && m.category === 'Status') return [];
     if (mon.taunt > 0 && m.category === 'Status') return [];
+    if (mon.healBlock > 0 && isHealingMove(m)) return [];
     return [i];
   });
   return choices.length ? choices : [STRUGGLE_INDEX];
@@ -256,17 +337,19 @@ export function activeWeather(state: BattleState): Weather | null {
 
 /** Damage options that come from the field. */
 export function fieldDamageOpts(state: BattleState) {
-  return { weather: activeWeather(state), terrain: state.terrain, doubles: state.format === 'doubles' };
+  return { weather: activeWeather(state), terrain: state.terrain, doubles: state.format === 'doubles', wonderRoom: state.wonderRoom > 0 };
 }
 
 const WEATHER_BALL_TYPE: Record<Weather, TypeName> = { sun: 'Fire', rain: 'Water', sand: 'Rock', snow: 'Ice' };
 
 /** The move as it will actually be used (Weather Ball changes type and power with the weather). */
 export function effectiveMove(state: BattleState, move: Move): Move {
+  const w = activeWeather(state);
   if (move.special === 'weatherBall') {
-    const w = activeWeather(state);
     if (w) return { ...move, type: WEATHER_BALL_TYPE[w], power: move.power * 2 };
   }
+  // Sunlight-charged moves (Solar Beam) are halved in other weather.
+  if (move.effects.charge?.skipIn === 'sun' && w && w !== 'sun') return { ...move, power: Math.floor(move.power / 2) };
   return move;
 }
 
@@ -294,6 +377,8 @@ interface QueueEntry {
   priority: number;
   tiebreak: number;
   fixed?: 'first' | 'last';
+  /** A switch to this team member instead of a move. */
+  switchTo?: number;
 }
 
 const STATUS_IMMUNITY: Record<MajorStatus, string[]> = {
@@ -325,6 +410,47 @@ const TERRAIN_SPECIALS: Partial<Record<string, Terrain>> = {
 };
 
 const PROTECT_MOVES = new Set(['protect', 'wideGuard', 'quickGuard']);
+
+/** Effects handled by the generic move code (so a special move with any of these still runs it). */
+function hasExtraEffects(e: MoveEffects): boolean {
+  return !!(e.status || e.targetBoosts || e.selfBoosts || e.heal || e.confuse || e.healBlock || e.typeChange
+    || e.targetAbility || e.hazard || e.clearHazards || e.selfSwitch || e.forceSwitch || e.itemChange);
+}
+
+/** What Baton Pass hands to the incoming Pokémon. */
+interface Passed {
+  boosts: Boosts;
+  substituteHp: number;
+  confusion: number;
+  leechSeed: BattlePokemon['leechSeed'];
+  perishCount: number;
+}
+
+const HAZARD_SET_TEXT: Record<Hazard, string> = {
+  stealthRock: 'Pointed stones float in the air around',
+  spikes: 'Spikes were scattered on the ground all around',
+  toxicSpikes: 'Poison spikes were scattered on the ground all around',
+  stickyWeb: 'A sticky web has been laid out on the ground around',
+};
+
+/** Moves that can hit a Pokémon hiding in each place, and whether they do double damage. */
+const HITS_HIDDEN: Record<Hidden, Record<string, number>> = {
+  air: { Thunder: 1, Hurricane: 1, 'Sky Uppercut': 1, Gust: 2, Twister: 2, 'Smack Down': 1, 'Thousand Arrows': 1 },
+  underground: { Earthquake: 2, Magnitude: 2, Fissure: 1 },
+  underwater: { Surf: 2, Whirlpool: 2 },
+  vanished: {},
+};
+
+const CHARGE_TEXT: Record<Hidden, string> = {
+  air: 'flew up high!', underground: 'burrowed its way under the ground!', underwater: 'hid underwater!', vanished: 'vanished instantly!',
+};
+
+const ROOM_TEXT = {
+  trickRoom: ['twisted the dimensions!', 'The twisted dimensions returned to normal!'],
+  wonderRoom: ['created a bizarre area in which Defense and Sp. Def stats are swapped!', 'Wonder Room wore off, and Defense and Sp. Def stats returned to normal!'],
+  magicRoom: ['created a bizarre area in which Pokémon’s held items lose their effects!', 'Magic Room wore off, and held items’ effects returned to normal!'],
+} as const;
+type Room = keyof typeof ROOM_TEXT;
 const SPREAD_TARGETS = new Set(['adjacentFoes', 'allAdjacent']);
 
 function chanceHit(chance: number, rng: Rng): boolean {
@@ -348,8 +474,17 @@ class TurnRunner {
     this.s.log.push({ turn: this.s.turn, kind, text, side, breakdown });
   }
 
+  /** "Player 1", or the Pokémon's name in a singles battle with one Pokémon per side. */
+  playerName(side: Side) {
+    return oneOnOne(this.s) ? this.s.sides[side].team[0].name : `Player ${side + 1}`;
+  }
+
   teamName(side: Side) {
-    return this.doubles ? `Player ${side + 1}'s team` : this.s.sides[side].mons[0].name;
+    return oneOnOne(this.s) ? this.s.sides[side].team[0].name : `Player ${side + 1}'s team`;
+  }
+
+  isActive(mon: BattlePokemon) {
+    return isActive(this.s, mon);
   }
 
   ally(mon: BattlePokemon) {
@@ -363,30 +498,264 @@ class TurnRunner {
   // ---------- Start of battle ----------
 
   startOfBattle() {
-    for (const mon of this.speedOrder(allMons(this.s))) {
-      const ab = getAbility(mon);
-      if (ab?.onStartWeather) {
-        this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
-        this.setWeather(mon, ab.onStartWeather);
-      }
-      if (ab?.onStartTerrain) {
-        this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
-        this.setTerrain(mon, ab.onStartTerrain);
-      }
-      if (ab?.negatesWeather && this.s.weather) {
-        this.log('info', `${mon.name}'s ${abilityName(mon)}: the effects of the weather disappeared.`, mon.side);
-      }
-      if (!ab?.onStartFoeBoosts) continue;
+    for (const mon of this.speedOrder(allMons(this.s))) this.onEntry(mon);
+  }
+
+  /** Abilities that act when a Pokémon enters the field (or gains the ability). */
+  onEntry(mon: BattlePokemon) {
+    if (!isAlive(mon)) return;
+    const ab = getAbility(mon);
+    if (ab?.onStartWeather) {
       this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
-      for (const foe of foesOf(this.s, mon)) {
-        const fAb = defenderAbility(foe, mon);
-        if (fAb?.innerFocus || fAb?.ownTempo) {
-          this.log('info', `${foe.name}'s ${abilityName(foe)} kept it from being affected!`, foe.side);
-          continue;
-        }
-        this.applyBoosts(foe, ab.onStartFoeBoosts, mon);
+      this.setWeather(mon, ab.onStartWeather);
+    }
+    if (ab?.onStartTerrain) {
+      this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+      this.setTerrain(mon, ab.onStartTerrain);
+    }
+    if (ab?.negatesWeather && this.s.weather) {
+      this.log('info', `${mon.name}'s ${abilityName(mon)}: the effects of the weather disappeared.`, mon.side);
+    }
+    if (!ab?.onStartFoeBoosts) return;
+    this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+    for (const foe of foesOf(this.s, mon)) {
+      const fAb = defenderAbility(foe, mon);
+      if (fAb?.innerFocus || fAb?.ownTempo) {
+        this.log('info', `${foe.name}'s ${abilityName(foe)} kept it from being affected!`, foe.side);
+        continue;
+      }
+      this.applyBoosts(foe, ab.onStartFoeBoosts, mon);
+    }
+  }
+
+  // ---------- Switching ----------
+
+  /** Healthy bench Pokémon on a side (team indices). */
+  bench(side: Side) {
+    return benchOptions(this.s, side);
+  }
+
+  /** Clears everything a Pokémon loses when it leaves the field. Returns what Baton Pass would hand over. */
+  withdraw(mon: BattlePokemon): Passed {
+    const passed: Passed = {
+      boosts: { ...mon.boosts }, substituteHp: mon.substituteHp, confusion: mon.confusion,
+      leechSeed: mon.leechSeed, perishCount: mon.perishCount,
+    };
+    Object.assign(mon, {
+      boosts: { ...ZERO_BOOSTS }, confusion: 0, taunt: 0, encore: null, substituteHp: 0, leechSeed: null, disable: null,
+      torment: false, yawn: 0, perishCount: 0, lastAction: null, choiceLock: null, protectStreak: 0, flashFire: false,
+      turnsActive: 0, toxicCounter: 0, healBlock: 0, ability: mon.build.ability, customAbility: mon.build.customAbility,
+      types: buildTypes(mon.build), addedType: null, charging: null, mustRecharge: false, vol: freshVolatiles(),
+    });
+    return passed;
+  }
+
+  /**
+   * Sends team member `index` into field position `slot`. The previous occupant must already be withdrawn
+   * (or fainted). `midTurn` entrants can't use Fake Out on the following turn's... they get a fresh first turn.
+   */
+  switchIn(side: Side, slot: number, index: number, opts: { passed?: Passed; midTurn?: boolean } = {}) {
+    const s = this.s.sides[side];
+    const mon = s.team[index];
+    s.mons[slot] = mon;
+    mon.vol = freshVolatiles();
+    mon.vol.moved = true;
+    mon.itemsSuppressed = this.s.magicRoom > 0;
+    // The end of this turn counts it as active for a turn; it should still get its "first turn" next turn.
+    mon.turnsActive = opts.midTurn ? -1 : 0;
+    this.log('switch', `Player ${side + 1} sent out ${mon.name}!`, side);
+    if (opts.passed) {
+      const p = opts.passed;
+      Object.assign(mon, { boosts: p.boosts, substituteHp: p.substituteHp, confusion: p.confusion, leechSeed: p.leechSeed, perishCount: p.perishCount });
+      this.log('info', `${mon.name} received what was passed to it!`, side);
+    }
+    this.entryHazards(mon);
+    this.onEntry(mon);
+  }
+
+  /** Withdraws `mon` and sends in team member `index` in its place. */
+  replace(mon: BattlePokemon, index: number, opts: { batonPass?: boolean; midTurn?: boolean; text?: string } = {}) {
+    const slot = slotOf(this.s, mon);
+    const passed = this.withdraw(mon);
+    this.log('switch', opts.text ?? `Player ${mon.side + 1} withdrew ${mon.name}!`, mon.side);
+    this.switchIn(mon.side, slot, index, { passed: opts.batonPass ? passed : undefined, midTurn: opts.midTurn });
+  }
+
+  /** A switch chosen as the turn's action. */
+  doSwitchAction(entry: QueueEntry) {
+    const mon = entry.mon;
+    if (!isAlive(mon) || !this.isActive(mon) || entry.switchTo === undefined) return;
+    mon.vol.moved = true;
+    if (!this.bench(mon.side).includes(entry.switchTo)) {
+      this.log('info', `${mon.name} couldn't switch out (that Pokémon isn't available).`, mon.side);
+      return;
+    }
+    this.replace(mon, entry.switchTo, { midTurn: true });
+  }
+
+  /** U-turn, Volt Switch, Baton Pass...: the user leaves and `preferred` (or the first healthy bench Pokémon) comes in. */
+  pivot(user: BattlePokemon, preferred: number | undefined, batonPass: boolean) {
+    const options = this.bench(user.side);
+    if (!options.length) return;
+    const index = preferred !== undefined && options.includes(preferred) ? preferred : options[0];
+    this.replace(user, index, { batonPass, midTurn: true, text: `${user.name} went back to ${this.playerName(user.side)}!` });
+  }
+
+  /** Roar, Dragon Tail: the target is replaced by a random bench Pokémon. Returns false if nothing could come in. */
+  dragOut(t: BattlePokemon, announceFail: boolean): boolean {
+    const options = this.isActive(t) && isAlive(t) ? this.bench(t.side) : [];
+    if (!options.length) {
+      if (announceFail) this.fail();
+      return false;
+    }
+    const index = options[Math.floor(this.rng.next() * options.length)];
+    this.replace(t, index, { midTurn: true, text: `${t.name} was dragged out!` });
+    return true;
+  }
+
+  entryHazards(mon: BattlePokemon) {
+    const h = this.s.sides[mon.side].hazards;
+    if (!HAZARDS.some((k) => h[k] > 0) || getItem(mon)?.hazardImmune) return;
+    const magicGuard = !!getAbility(mon)?.magicGuard;
+    if (h.stealthRock && !magicGuard) {
+      const eff = typesOf(mon).reduce((m, t) => m * typeMultiplier('Rock', t), 1);
+      this.hurt(mon, Math.max(1, Math.floor((mon.stats.hp * eff) / 8)), 'was hurt by the pointed stones');
+    }
+    if (!isGrounded(mon) || !isAlive(mon)) return;
+    if (h.spikes && !magicGuard) {
+      const frac = [0, 1 / 8, 1 / 6, 1 / 4][h.spikes];
+      this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp * frac)), 'was hurt by the spikes');
+    }
+    if (h.toxicSpikes && isAlive(mon)) {
+      if (typesOf(mon).includes('Poison')) {
+        h.toxicSpikes = 0;
+        this.log('field', `${mon.name} absorbed the poison spikes!`, mon.side);
+      } else {
+        const status = h.toxicSpikes >= 2 ? 'tox' : 'psn';
+        if (this.canInflict(mon, status, null)) this.inflict(mon, status);
       }
     }
+    if (h.stickyWeb && isAlive(mon)) {
+      this.log('info', `${mon.name} was caught in a sticky web!`, mon.side);
+      this.applyBoosts(mon, { spe: -1 }, foesOf(this.s, mon)[0] ?? null);
+    }
+  }
+
+  layHazard(user: BattlePokemon, hazard: Hazard, announceFail: boolean) {
+    const foeSide: Side = user.side === 0 ? 1 : 0;
+    const h = this.s.sides[foeSide].hazards;
+    if (h[hazard] >= HAZARD_MAX[hazard]) {
+      if (announceFail) this.fail();
+      return;
+    }
+    h[hazard]++;
+    this.log('field', `${HAZARD_SET_TEXT[hazard]} ${this.teamName(foeSide)}!`, foeSide);
+  }
+
+  /** Rapid Spin ('own') or Defog ('both'). Defog also removes the foes' screens. */
+  clearHazards(user: BattlePokemon, scope: 'own' | 'both') {
+    const sides: Side[] = scope === 'both' ? [user.side, user.side === 0 ? 1 : 0] : [user.side];
+    for (const side of sides) {
+      const st = this.s.sides[side];
+      for (const k of HAZARDS) {
+        if (!st.hazards[k]) continue;
+        st.hazards[k] = 0;
+        this.log('field', `${user.name} removed ${HAZARD_LABELS[k]} from ${this.teamName(side)}'s side!`, user.side);
+      }
+      if (scope === 'both' && side !== user.side) {
+        if (st.reflect) this.log('field', `${this.teamName(side)}'s Reflect was blown away!`, side);
+        if (st.lightScreen) this.log('field', `${this.teamName(side)}'s Light Screen was blown away!`, side);
+        st.reflect = 0;
+        st.lightScreen = 0;
+      }
+    }
+    if (scope === 'own' && user.leechSeed) {
+      user.leechSeed = null;
+      this.log('info', `${user.name} was freed from Leech Seed!`, user.side);
+    }
+  }
+
+  // ---------- Types and abilities ----------
+
+  changeType(t: BattlePokemon, change: NonNullable<MoveEffects['typeChange']>): boolean {
+    const types = [...new Set(change.types)].slice(0, 2);
+    if (!types.length || !isAlive(t)) return false;
+    if (change.mode === 'add') {
+      if (typesOf(t).includes(types[0])) return this.fail(), false;
+      t.addedType = types[0];
+      this.log('status', `${types[0]} type was added to ${t.name}!`, t.side);
+      return true;
+    }
+    const current = typesOf(t);
+    if (current.length === types.length && types.every((x) => current.includes(x))) return this.fail(), false;
+    t.types = types;
+    t.addedType = null;
+    this.log('status', `${t.name} transformed into the ${types.join('/')} type!`, t.side);
+    return true;
+  }
+
+  changeAbility(user: BattlePokemon, t: BattlePokemon, spec: NonNullable<MoveEffects['targetAbility']>): boolean {
+    const key = (ability: string, custom?: CustomAbility) => (ability === CUSTOM_ABILITY ? `${ability}:${JSON.stringify(custom)}` : ability);
+    if (spec.ability === SWAP_ABILITIES) {
+      if (t === user || key(t.ability, t.customAbility) === key(user.ability, user.customAbility)) return this.fail(), false;
+      const mine = { ability: user.ability, customAbility: user.customAbility };
+      user.ability = t.ability;
+      user.customAbility = t.customAbility;
+      t.ability = mine.ability;
+      t.customAbility = mine.customAbility;
+      user.flashFire = false;
+      t.flashFire = false;
+      this.log('status', `${user.name} swapped Abilities with ${t.name}!`, user.side);
+      if (user.ability) this.log('info', `${user.name} acquired ${abilityName(user)}!`, user.side);
+      if (t.ability) this.log('info', `${t.name} acquired ${abilityName(t)}!`, t.side);
+      this.abilityGained(user);
+      this.abilityGained(t);
+      return true;
+    }
+    const next = spec.ability === COPY_USER_ABILITY
+      ? { ability: user.ability, customAbility: user.customAbility }
+      : { ability: spec.ability, customAbility: spec.customAbility };
+    if (key(t.ability, t.customAbility) === key(next.ability, next.customAbility)) return this.fail(), false;
+    t.ability = next.ability;
+    t.customAbility = next.ability === CUSTOM_ABILITY && next.customAbility ? structuredClone(next.customAbility) : undefined;
+    t.flashFire = false;
+    if (!t.ability) this.log('status', `${t.name}'s Ability was suppressed!`, t.side);
+    else this.log('status', `${t.name} acquired ${abilityName(t)}!`, t.side);
+    this.abilityGained(t);
+    return true;
+  }
+
+  /** A new ability cures conditions it prevents and triggers its entry effects. */
+  abilityGained(mon: BattlePokemon) {
+    const ab = getAbility(mon);
+    if (mon.status && ab?.statusImmune?.includes(mon.status)) {
+      this.log('heal', `${mon.name}'s ${abilityName(mon)} cured its ${STATUS_CURE_TEXT[mon.status]}!`, mon.side);
+      mon.status = null;
+    }
+    if (mon.confusion && ab?.ownTempo) {
+      mon.confusion = 0;
+      this.log('heal', `${mon.name}'s ${abilityName(mon)} snapped it out of its confusion!`, mon.side);
+    }
+    this.onEntry(mon);
+  }
+
+  // ---------- Rooms ----------
+
+  toggleRoom(user: BattlePokemon, room: Room): boolean {
+    if (this.s[room] > 0) {
+      this.s[room] = 0;
+      this.log('field', ROOM_TEXT[room][1]);
+    } else {
+      this.s[room] = 5;
+      this.log('field', `${user.name} ${ROOM_TEXT[room][0]}`, user.side);
+    }
+    if (room === 'magicRoom') this.syncItems();
+    return true;
+  }
+
+  /** Magic Room switches every held item's effects off (or back on). */
+  syncItems() {
+    for (const side of this.s.sides) for (const m of side.team) m.itemsSuppressed = this.s.magicRoom > 0;
   }
 
   // ---------- Field ----------
@@ -509,7 +878,9 @@ class TurnRunner {
     }
   }
 
+  /** Restores HP (nothing happens under Heal Block). */
   heal(mon: BattlePokemon, amount: number, reason: string) {
+    if (mon.healBlock > 0) return;
     const healed = Math.min(amount, mon.stats.hp - mon.currentHp);
     if (healed <= 0) return;
     mon.currentHp += healed;
@@ -547,9 +918,22 @@ class TurnRunner {
     this.queue = [];
     for (const mon of allMons(this.s)) {
       if (!isAlive(mon)) continue;
-      const allowed = availableChoices(mon);
       let action = choices[mon.uid];
-      if (!action || !allowed.includes(action.move)) action = { move: allowed[0], target: action?.target };
+      if (mon.mustRecharge) {
+        this.queue.push({ mon, action: { move: STRUGGLE_INDEX }, move: STRUGGLE, priority: 0, tiebreak: this.rng.next() });
+        continue;
+      }
+      if (mon.charging && mon.build.moves[mon.charging.move]) {
+        const move = mon.build.moves[mon.charging.move]!;
+        this.queue.push({ mon, action: { move: mon.charging.move, target: mon.charging.target }, move, priority: movePriority(mon, move), tiebreak: this.rng.next() });
+        continue;
+      }
+      if (action?.switchTo !== undefined && this.bench(mon.side).includes(action.switchTo)) {
+        this.queue.push({ mon, action, move: STRUGGLE, priority: SWITCH_PRIORITY, tiebreak: this.rng.next(), switchTo: action.switchTo });
+        continue;
+      }
+      const allowed = availableChoices(mon);
+      if (!action || !allowed.includes(action.move)) action = { move: allowed[0], target: action?.target, pivotTo: action?.pivotTo };
       const move = getChoiceMove(mon, action.move);
       this.queue.push({ mon, action, move, priority: movePriority(mon, move), tiebreak: this.rng.next() });
     }
@@ -560,8 +944,10 @@ class TurnRunner {
     const q = this.queue;
     const tr = this.s.trickRoom > 0;
     const spe = (m: BattlePokemon) => effectiveSpeed(this.s, m);
+    const switching = (e: QueueEntry) => e.switchTo !== undefined;
     if (q.length === 2) {
       const [a, b] = q;
+      if (switching(a) && !switching(b)) return `${a.mon.name} switches out first (switching happens before moves).`;
       if (a.priority !== b.priority) {
         return `${a.mon.name} moves first (priority ${a.priority > 0 ? '+' : ''}${a.priority}).`;
       }
@@ -569,7 +955,7 @@ class TurnRunner {
       if (spe(a.mon) === spe(b.mon)) return `Speed tie at ${spe(a.mon)}! ${a.mon.name} won the coin flip.`;
       return tr ? `${a.mon.name} is slower and moves first under Trick Room (${speeds}).` : `${a.mon.name} is faster (${speeds}).`;
     }
-    const parts = q.map((e) => `${e.mon.name} (${e.priority !== 0 ? `priority ${e.priority > 0 ? '+' : ''}${e.priority}, ` : ''}Spe ${spe(e.mon)})`);
+    const parts = q.map((e) => `${e.mon.name} (${switching(e) ? 'switching, ' : e.priority !== 0 ? `priority ${e.priority > 0 ? '+' : ''}${e.priority}, ` : ''}Spe ${spe(e.mon)})`);
     return `Turn order: ${parts.join(' → ')}${tr ? ' (Trick Room: slower first)' : ''}.`;
   }
 
@@ -585,12 +971,43 @@ class TurnRunner {
     this.log('order', this.orderReason(), this.queue[0]?.mon.side);
     while (this.queue.length) {
       const entry = this.queue.shift()!;
-      this.executeAction(entry);
+      if (entry.switchTo !== undefined) this.doSwitchAction(entry);
+      else this.executeAction(entry);
       if (this.checkFaints()) return;
       this.sortQueue();
     }
     this.endOfTurn();
-    this.checkFaints();
+    if (!this.checkFaints()) this.computePending();
+  }
+
+  /** Marks fainted field positions that a healthy bench Pokémon must fill before the next turn. */
+  computePending() {
+    this.s.pendingReplacements = [];
+    if (this.s.winner !== null) return;
+    this.s.sides.forEach((side, i) => {
+      let available = this.bench(i as Side).length;
+      side.mons.forEach((m, slot) => {
+        if (!isAlive(m) && available > 0) {
+          this.s.pendingReplacements.push({ side: i as Side, slot });
+          available--;
+        }
+      });
+    });
+  }
+
+  /** Fills the pending positions with the chosen team members (or the first healthy ones). */
+  applyReplacements(picks: Record<string, number>) {
+    const pending = this.s.pendingReplacements;
+    this.s.pendingReplacements = [];
+    for (const ref of pending) {
+      const options = this.bench(ref.side);
+      if (!options.length) continue;
+      const want = picks[replacementKey(ref)];
+      const index = want !== undefined && options.includes(want) ? want : options[0];
+      this.switchIn(ref.side, ref.slot, index);
+      if (this.checkFaints()) return;
+    }
+    this.computePending();
   }
 
   /** Returns false if the Pokémon can't act this turn. */
@@ -643,8 +1060,16 @@ class TurnRunner {
 
   executeAction(entry: QueueEntry, instructed = false) {
     const user = entry.mon;
-    if (!isAlive(user)) return;
+    if (!isAlive(user) || !this.isActive(user)) return;
     user.vol.moved = true;
+    if (user.mustRecharge && !instructed) {
+      user.mustRecharge = false;
+      this.log('info', `${user.name} must recharge!`, user.side);
+      return;
+    }
+    // The second turn of a two-turn move: no PP is spent, and anything that stops it cancels the move.
+    const charged = !!user.charging && !instructed && entry.action.move === user.charging.move;
+    if (user.charging && !instructed) user.charging = null;
 
     // An Encore that started earlier this turn replaces the chosen move.
     const enc = user.encore;
@@ -680,101 +1105,29 @@ class TurnRunner {
       this.log('info', `${user.name} can't use ${entry.move.name} after the taunt!`, user.side);
       return;
     }
+    if (!struggle && user.healBlock > 0 && isHealingMove(entry.move)) {
+      this.log('info', `${user.name} can't use ${entry.move.name} because of Heal Block!`, user.side);
+      return;
+    }
     if (struggle) {
       this.log('info', `${user.name} has no moves left!`, user.side);
-    } else {
+    } else if (!charged) {
       user.pp[action.move] = Math.max(0, user.pp[action.move] - 1);
       if (getItem(user)?.choice && user.choiceLock === null) user.choiceLock = action.move;
       user.lastAction = { move: action.move, target: action.target };
     }
     const move = effectiveMove(this.s, entry.move);
+    if (move.effects.charge && !charged && !this.startCharge(user, move, action)) return;
     this.log('move', `${user.name} used ${move.name}!`, user.side);
 
     const sp = move.special;
     if (!sp || !PROTECT_MOVES.has(sp)) user.protectStreak = 0;
-    const side = this.s.sides[user.side];
-    const ally = this.ally(user);
+    if (sp === 'fakeOut' && user.turnsActive > 0) return this.fail();
 
-    const weather = sp ? WEATHER_SPECIALS[sp] : undefined;
-    if (weather) {
-      if (!this.setWeather(user, weather)) this.fail();
-      return;
-    }
-    const terrain = sp ? TERRAIN_SPECIALS[sp] : undefined;
-    if (terrain) {
-      if (!this.setTerrain(user, terrain)) this.fail();
-      return;
-    }
-
-    switch (sp) {
-      case 'protect':
-      case 'wideGuard':
-      case 'quickGuard':
-        return this.doProtect(user, sp);
-      case 'followMe':
-      case 'ragePowder':
-        if (!this.doubles) return this.fail();
-        user.vol.centerOfAttention = sp === 'ragePowder' ? 'powder' : 'followMe';
-        return this.log('info', `${user.name} became the center of attention!`, user.side);
-      case 'helpingHand':
-        if (!isAlive(ally) || ally.vol.moved) return this.fail();
-        ally.vol.helpingHand = true;
-        return this.log('info', `${user.name} is ready to help ${ally.name}!`, user.side);
-      case 'allySwitch': {
-        if (!isAlive(ally)) return this.fail();
-        const [a, b] = side.mons;
-        side.mons[0] = b;
-        side.mons[1] = a;
-        return this.log('info', `${user.name} and ${ally.name} switched places!`, user.side);
-      }
-      case 'tailwind':
-        if (side.tailwind > 0) return this.fail();
-        side.tailwind = 4;
-        return this.log('field', `The Tailwind blew from behind ${this.teamName(user.side)}!`, user.side);
-      case 'trickRoom':
-        if (this.s.trickRoom > 0) {
-          this.s.trickRoom = 0;
-          return this.log('field', 'The twisted dimensions returned to normal!');
-        }
-        this.s.trickRoom = 5;
-        return this.log('field', `${user.name} twisted the dimensions!`, user.side);
-      case 'reflect':
-      case 'lightScreen': {
-        const key = sp;
-        if (side[key] > 0) return this.fail();
-        side[key] = getItem(user)?.lightClay ? 8 : 5;
-        return this.log('field', `${sp === 'reflect' ? 'Reflect' : 'Light Screen'} made ${this.teamName(user.side)} stronger against ${sp === 'reflect' ? 'physical' : 'special'} moves!`, user.side);
-      }
-      case 'fakeOut':
-        if (user.turnsActive > 0) return this.fail();
-        break;
-      case 'perishSong': {
-        const hearers = allMons(this.s).filter((m) => isAlive(m) && m.perishCount === 0);
-        if (!hearers.length) return this.fail();
-        this.log('field', 'All Pokémon that hear the song will faint in three turns!', user.side);
-        for (const m of hearers) {
-          const ab = m === user ? getAbility(m) : defenderAbility(m, user);
-          if (ab?.immune?.({ attacker: user, defender: m, move, eff: 1, crit: false, fromAlly: false })) {
-            this.log('info', `${m.name}'s ${abilityName(m)} blocks the song!`, m.side);
-            continue;
-          }
-          m.perishCount = 4;
-        }
-        return;
-      }
-      case 'substitute': {
-        const cost = Math.floor(user.stats.hp / 4);
-        if (user.substituteHp > 0) return this.log('info', `${user.name} already has a substitute!`, user.side);
-        if (user.currentHp <= cost || cost < 1) {
-          return this.log('info', 'But it does not have enough HP left to make a substitute!', user.side);
-        }
-        user.currentHp -= cost;
-        user.substituteHp = cost;
-        this.log('info', `${user.name} put in a substitute! (-${cost} HP)`, user.side);
-        this.checkPinchBerry(user);
-        return;
-      }
-    }
+    // Field and self specials. A status move stops here unless it also has generic effects
+    // (e.g. a Protect that raises a stat); a damaging move carries on to hit its targets.
+    const special = this.fieldSpecial(user, move, sp);
+    if (special !== undefined && move.category === 'Status' && (!special || !hasExtraEffects(move.effects))) return;
 
     const targets = this.resolveTargets(user, move, action);
     if (!targets.length) {
@@ -812,7 +1165,14 @@ class TurnRunner {
 
     for (const t of targets) {
       if (!isAlive(t)) continue;
+      let hitMove = move;
       if (t !== user) {
+        const hiddenMult = this.hiddenMultiplier(user, t, move);
+        if (hiddenMult === 0) {
+          this.log('info', `${t.name} avoided the attack!`, t.side);
+          continue;
+        }
+        if (hiddenMult !== 1) hitMove = { ...move, power: move.power * hiddenMult };
         if (this.blocked(t, move, entry)) continue;
         if (!this.accuracyHit(user, t, move)) {
           this.log('info', `${t.name} avoided the attack!`, t.side);
@@ -826,7 +1186,7 @@ class TurnRunner {
         continue;
       }
       if (damaging) {
-        const dealt = this.hit(user, t, move, struggle, spread, sheerForce);
+        const dealt = this.hit(user, t, hitMove, struggle, spread, sheerForce);
         if (dealt !== null) {
           anyHit = true;
           totalDealt += dealt;
@@ -856,6 +1216,189 @@ class TurnRunner {
       const chance = e.selfBoosts.chance * (aAb?.sereneGrace ? 2 : 1);
       if (chanceHit(chance, this.rng)) this.applyBoosts(user, e.selfBoosts.boosts, null);
     }
+    if (anyHit && e.recharge && isAlive(user)) user.mustRecharge = true;
+    if (anyHit && e.hazard) this.layHazard(user, e.hazard, !damaging);
+    if (anyHit && e.clearHazards && isAlive(user)) this.clearHazards(user, e.clearHazards);
+    if (anyHit && e.selfSwitch && isAlive(user) && this.isActive(user) && this.s.winner === null) {
+      if (!this.bench(user.side).length) {
+        if (!damaging && !hasExtraEffects({ ...e, selfSwitch: undefined })) this.fail();
+      } else {
+        this.pivot(user, action.pivotTo, e.selfSwitch === 'batonPass');
+      }
+    }
+  }
+
+  failed(): false {
+    this.fail();
+    return false;
+  }
+
+  /**
+   * First turn of a two-turn move. Returns true if the move should go ahead right away
+   * (its weather is up, or a Power Herb was used); otherwise the user starts charging.
+   */
+  startCharge(user: BattlePokemon, move: Move, action: Action): boolean {
+    const c = move.effects.charge!;
+    const hide = c.hide;
+    this.log('move', hide ? `${user.name} ${CHARGE_TEXT[hide]}` : c.skipIn === 'sun' ? `${user.name} absorbed light!` : `${user.name} is charging up ${move.name}!`, user.side);
+    if (c.boosts) this.applyBoosts(user, c.boosts, null);
+    if (c.skipIn && this.weather === c.skipIn) return true;
+    if (getItem(user)?.powerHerb) {
+      this.log('info', `${user.name} became fully charged due to its ${user.item}!`, user.side);
+      user.item = '';
+      return true;
+    }
+    user.charging = { move: action.move, ...(action.target ? { target: action.target } : {}), ...(hide ? { hide } : {}) };
+    return false;
+  }
+
+  /** Is `t` out of reach (Fly, Dig...) for this move? Returns the damage multiplier if it can be hit, or 0. */
+  hiddenMultiplier(user: BattlePokemon, t: BattlePokemon, move: Move): number {
+    const hide = t.charging?.hide;
+    if (!hide || t === user || t.side === user.side) return 1;
+    if (getAbility(user)?.noGuard || getAbility(t)?.noGuard) return 1;
+    return HITS_HIDDEN[hide][move.name] ?? 0;
+  }
+
+  /** Knock Off, Thief, Trick, Bestow. Returns true if items changed hands. */
+  changeItem(user: BattlePokemon, t: BattlePokemon, mode: ItemChange, announceFail: boolean): boolean {
+    const no = () => {
+      if (announceFail) this.fail();
+      return false;
+    };
+    if (t === user || !isAlive(t)) return no();
+    const unlock = (m: BattlePokemon) => { m.choiceLock = null; };
+    switch (mode) {
+      case 'remove': {
+        if (!t.item) return no();
+        this.log('info', `${user.name} knocked off ${t.name}'s ${t.item}!`, t.side);
+        t.item = '';
+        unlock(t);
+        return true;
+      }
+      case 'steal': {
+        if (!t.item || user.item) return no();
+        this.log('info', `${user.name} stole ${t.name}'s ${t.item}!`, user.side);
+        user.item = t.item;
+        t.item = '';
+        unlock(t);
+        unlock(user);
+        this.checkPinchBerry(user);
+        this.checkLum(user);
+        return true;
+      }
+      case 'swap': {
+        if (!t.item && !user.item) return no();
+        const mine = user.item;
+        user.item = t.item;
+        t.item = mine;
+        this.log('info', `${user.name} switched items with ${t.name}!`, user.side);
+        if (user.item) this.log('info', `${user.name} obtained ${user.item}.`, user.side);
+        if (t.item) this.log('info', `${t.name} obtained ${t.item}.`, t.side);
+        unlock(user);
+        unlock(t);
+        for (const m of [user, t]) {
+          this.checkPinchBerry(m);
+          this.checkLum(m);
+        }
+        return true;
+      }
+      case 'give': {
+        if (!user.item || t.item) return no();
+        this.log('info', `${t.name} received ${user.item} from ${user.name}!`, t.side);
+        t.item = user.item;
+        user.item = '';
+        unlock(user);
+        this.checkPinchBerry(t);
+        this.checkLum(t);
+        return true;
+      }
+    }
+  }
+
+  /** Specials that act on the user, its side or the field. Returns undefined if `sp` isn't one, else whether it worked. */
+  fieldSpecial(user: BattlePokemon, move: Move, sp: Move['special']): boolean | undefined {
+    if (!sp) return undefined;
+    const side = this.s.sides[user.side];
+    const ally = this.ally(user);
+    const weather = WEATHER_SPECIALS[sp];
+    if (weather) return this.setWeather(user, weather) || this.failed();
+    const terrain = TERRAIN_SPECIALS[sp];
+    if (terrain) return this.setTerrain(user, terrain) || this.failed();
+
+    switch (sp) {
+      case 'protect':
+      case 'wideGuard':
+      case 'quickGuard':
+        return this.doProtect(user, sp, move);
+      case 'followMe':
+      case 'ragePowder':
+        if (!this.doubles) return this.failed();
+        user.vol.centerOfAttention = sp === 'ragePowder' ? 'powder' : 'followMe';
+        this.log('info', `${user.name} became the center of attention!`, user.side);
+        return true;
+      case 'helpingHand':
+        if (!isAlive(ally) || ally.vol.moved) return this.failed();
+        ally.vol.helpingHand = true;
+        this.log('info', `${user.name} is ready to help ${ally.name}!`, user.side);
+        return true;
+      case 'allySwitch': {
+        if (!isAlive(ally)) return this.failed();
+        const [a, b] = side.mons;
+        side.mons[0] = b;
+        side.mons[1] = a;
+        this.log('info', `${user.name} and ${ally.name} switched places!`, user.side);
+        return true;
+      }
+      case 'tailwind':
+        if (side.tailwind > 0) return this.failed();
+        side.tailwind = 4;
+        this.log('field', `The Tailwind blew from behind ${this.teamName(user.side)}!`, user.side);
+        return true;
+      case 'trickRoom':
+      case 'wonderRoom':
+      case 'magicRoom':
+        return this.toggleRoom(user, sp);
+      case 'reflect':
+      case 'lightScreen': {
+        const key = sp;
+        if (side[key] > 0) return this.failed();
+        side[key] = getItem(user)?.lightClay ? 8 : 5;
+        this.log('field', `${sp === 'reflect' ? 'Reflect' : 'Light Screen'} made ${this.teamName(user.side)} stronger against ${sp === 'reflect' ? 'physical' : 'special'} moves!`, user.side);
+        return true;
+      }
+      case 'perishSong': {
+        const hearers = allMons(this.s).filter((m) => isAlive(m) && m.perishCount === 0);
+        if (!hearers.length) return this.failed();
+        this.log('field', 'All Pokémon that hear the song will faint in three turns!', user.side);
+        for (const m of hearers) {
+          const ab = m === user ? getAbility(m) : defenderAbility(m, user);
+          if (ab?.immune?.({ attacker: user, defender: m, move, eff: 1, crit: false, fromAlly: false })) {
+            this.log('info', `${m.name}'s ${abilityName(m)} blocks the song!`, m.side);
+            continue;
+          }
+          m.perishCount = 4;
+        }
+        return true;
+      }
+      case 'substitute': {
+        const cost = Math.floor(user.stats.hp / 4);
+        if (user.substituteHp > 0) {
+          this.log('info', `${user.name} already has a substitute!`, user.side);
+          return false;
+        }
+        if (user.currentHp <= cost || cost < 1) {
+          this.log('info', 'But it does not have enough HP left to make a substitute!', user.side);
+          return false;
+        }
+        user.currentHp -= cost;
+        user.substituteHp = cost;
+        this.log('info', `${user.name} put in a substitute! (-${cost} HP)`, user.side);
+        this.checkPinchBerry(user);
+        return true;
+      }
+    }
+    return undefined;
   }
 
   /** Instruct: the target immediately uses its last move again. */
@@ -867,20 +1410,34 @@ class TurnRunner {
     this.executeAction({ mon: t, action: last, move, priority: movePriority(t, move), tiebreak: 0 }, true);
   }
 
-  doProtect(user: BattlePokemon, kind: 'protect' | 'wideGuard' | 'quickGuard') {
+  doProtect(user: BattlePokemon, kind: 'protect' | 'wideGuard' | 'quickGuard', move: Move): boolean {
     const last = this.queue.length === 0;
     const chance = 1 / 3 ** user.protectStreak;
     if (last || (user.protectStreak > 0 && this.rng.next() >= chance)) {
       user.protectStreak = 0;
-      return this.fail();
+      return this.failed();
     }
     user.protectStreak++;
     if (kind === 'protect') {
-      user.vol.protected = true;
-      return this.log('info', `${user.name} protected itself!`, user.side);
+      const e = move.effects;
+      user.vol.protect = { ...(e.protectContact ? { contact: e.protectContact } : {}), ...(e.protectAttacksOnly ? { attacksOnly: true } : {}) };
+      this.log('info', `${user.name} protected itself!`, user.side);
+      return true;
     }
     this.s.sides[user.side][kind] = true;
-    return this.log('field', `${kind === 'wideGuard' ? 'Wide Guard' : 'Quick Guard'} protected ${this.teamName(user.side)}!`, user.side);
+    this.log('field', `${kind === 'wideGuard' ? 'Wide Guard' : 'Quick Guard'} protected ${this.teamName(user.side)}!`, user.side);
+    return true;
+  }
+
+  /** Spiky Shield, Baneful Bunker, Obstruct...: punish a Pokémon that made contact with a protected target. */
+  protectContactEffects(user: BattlePokemon, t: BattlePokemon, move: Move) {
+    const c = t.vol.protect?.contact;
+    if (!c || !move.flags?.includes('contact') || !isAlive(user) || user === t) return;
+    if (c.damage && !getAbility(user)?.magicGuard) {
+      this.hurt(user, Math.max(1, Math.floor((user.stats.hp * c.damage) / 100)), `was hurt by ${t.name}'s protection`);
+    }
+    if (c.status && isAlive(user) && this.canInflict(user, c.status, t)) this.inflict(user, c.status);
+    if (c.boosts && isAlive(user)) this.applyBoosts(user, c.boosts, t);
   }
 
   resolveTargets(user: BattlePokemon, move: Move, action: Action): BattlePokemon[] {
@@ -926,8 +1483,13 @@ class TurnRunner {
     const user = entry.mon;
     const tSide = this.s.sides[t.side];
     if (move.target === 'ally' || move.target === 'selfAndAlly') return false;
-    if (t.vol.protected) {
+    if (t.vol.protect && move.effects.charge?.hide === 'vanished') {
+      t.vol.protect = null;
+      this.log('info', `It broke through ${t.name}'s protection!`, t.side);
+    }
+    if (t.vol.protect && !(t.vol.protect.attacksOnly && move.category === 'Status')) {
       this.log('info', `${t.name} protected itself!`, t.side);
+      this.protectContactEffects(user, t, move);
       return true;
     }
     if (tSide.wideGuard && SPREAD_TARGETS.has(move.target)) {
@@ -985,7 +1547,7 @@ class TurnRunner {
   /** Base powers for each hit of the move (one entry for single-hit moves). */
   hitPowers(user: BattlePokemon, move: Move): number[] {
     if (move.special === 'beatUp') {
-      const party = this.s.sides[user.side].mons.filter((m) => m === user || (isAlive(m) && !m.status));
+      const party = this.s.sides[user.side].team.filter((m) => m === user || (isAlive(m) && !m.status));
       return party.map((m) => 5 + Math.floor(m.build.baseStats.atk / 10));
     }
     const range = move.effects.multiHit;
@@ -1137,6 +1699,17 @@ class TurnRunner {
       if (e.flinch && !t.vol.moved && !tAb?.innerFocus && chanceHit(e.flinch * mult, this.rng)) {
         t.vol.flinched = true;
       }
+      if (e.healBlock && t.healBlock === 0) {
+        t.healBlock = e.healBlock;
+        this.log('status', `${t.name} was prevented from healing!`, t.side);
+      }
+    }
+    if (t.currentHp > 0 && !hitSub && isAlive(user)) {
+      const e = move.effects;
+      if (e.typeChange) this.changeType(t, e.typeChange);
+      if (e.targetAbility) this.changeAbility(user, t, e.targetAbility);
+      if (e.itemChange) this.changeItem(user, t, e.itemChange, false);
+      if (e.forceSwitch) this.dragOut(t, false);
     }
     return total;
   }
@@ -1227,7 +1800,8 @@ class TurnRunner {
       acted = true;
     }
     if (e.heal) {
-      if (t.currentHp >= t.stats.hp) this.log('info', `${t.name}'s HP is full!`, t.side);
+      if (t.healBlock > 0) this.log('info', `${t.name} can't restore HP because of Heal Block!`, t.side);
+      else if (t.currentHp >= t.stats.hp) this.log('info', `${t.name}'s HP is full!`, t.side);
       else this.heal(t, Math.floor((t.stats.hp * e.heal) / 100), 'restored HP');
       acted = true;
     }
@@ -1239,7 +1813,31 @@ class TurnRunner {
       if (chanceHit(e.confuse, this.rng)) this.confuse(t, t === user ? null : user, true);
       acted = true;
     }
-    if (!acted && !e.selfBoosts) this.log('info', 'But nothing happened!');
+    if (e.healBlock) {
+      if (t.healBlock > 0) this.fail();
+      else {
+        t.healBlock = e.healBlock;
+        this.log('status', `${t.name} was prevented from healing!`, t.side);
+      }
+      acted = true;
+    }
+    if (e.typeChange) {
+      this.changeType(t, e.typeChange);
+      acted = true;
+    }
+    if (e.targetAbility) {
+      this.changeAbility(user, t, e.targetAbility);
+      acted = true;
+    }
+    if (e.itemChange) {
+      this.changeItem(user, t, e.itemChange, true);
+      acted = true;
+    }
+    if (e.forceSwitch) {
+      if (t !== user) this.dragOut(t, true);
+      acted = true;
+    }
+    if (!acted && !e.selfBoosts && !e.hazard && !e.clearHazards && !e.selfSwitch) this.log('info', 'But nothing happened!');
     return true;
   }
 
@@ -1309,7 +1907,12 @@ class TurnRunner {
       tick('reflect', `${this.teamName(s)}'s Reflect wore off!`);
       tick('lightScreen', `${this.teamName(s)}'s Light Screen wore off!`);
     });
-    if (this.s.trickRoom > 0 && --this.s.trickRoom === 0) this.log('field', 'The twisted dimensions returned to normal!');
+    for (const room of ['trickRoom', 'wonderRoom', 'magicRoom'] as Room[]) {
+      if (this.s[room] > 0 && --this.s[room] === 0) {
+        this.log('field', ROOM_TEXT[room][1]);
+        if (room === 'magicRoom') this.syncItems();
+      }
+    }
     if (this.s.weather && this.s.weatherTurns > 0 && --this.s.weatherTurns === 0) {
       const ended: Record<Weather, string> = {
         sun: 'The harsh sunlight faded.', rain: 'The rain stopped.', sand: 'The sandstorm subsided.', snow: 'The snow stopped.',
@@ -1334,6 +1937,7 @@ class TurnRunner {
     for (const mon of allMons(this.s)) {
       if (!isAlive(mon)) continue;
       if (mon.taunt > 0 && --mon.taunt === 0) this.log('status', `${mon.name} shook off the taunt!`, mon.side);
+      if (mon.healBlock > 0 && --mon.healBlock === 0) this.log('status', `${mon.name}'s Heal Block wore off!`, mon.side);
       if (mon.disable && --mon.disable.turns <= 0) {
         mon.disable = null;
         this.log('status', `${mon.name}'s move is no longer disabled!`, mon.side);
@@ -1348,13 +1952,13 @@ class TurnRunner {
 
   /** Logs new faints and sets the winner. Returns true if the battle is over. */
   checkFaints(): boolean {
-    for (const mon of allMons(this.s)) {
+    for (const mon of [...this.s.sides[0].team, ...this.s.sides[1].team]) {
       if (mon.currentHp <= 0 && !mon.faintLogged) {
         mon.faintLogged = true;
         this.log('faint', `${mon.name} fainted!`, mon.side);
       }
     }
-    const out = this.s.sides.map((side) => side.mons.every((m) => m.currentHp <= 0));
+    const out = this.s.sides.map((side) => side.team.every((m) => m.currentHp <= 0));
     if (!out[0] && !out[1]) return false;
     if (out[0] && out[1]) {
       this.s.winner = 'draw';
@@ -1362,8 +1966,7 @@ class TurnRunner {
     } else {
       const winner: Side = out[0] ? 1 : 0;
       this.s.winner = winner;
-      const who = this.doubles ? `Player ${winner + 1}` : this.s.sides[winner].mons[0].name;
-      this.log('result', `${who} wins the battle!`, winner);
+      this.log('result', `${this.playerName(winner)} wins the battle!`, winner);
     }
     return true;
   }
@@ -1373,6 +1976,11 @@ class TurnRunner {
 export function runTurn(state: BattleState, choices: TurnChoices, rng: Rng = mathRng): BattleState {
   if (state.winner !== null) return state;
   const s = structuredClone(state);
+  // Any replacements nobody picked use the first healthy bench Pokémon.
+  if (s.pendingReplacements?.length) {
+    new TurnRunner(s, rng).applyReplacements({});
+    if (s.winner !== null) return s;
+  }
   s.turn++;
   s.log.push({ turn: s.turn, kind: 'turn', text: `Turn ${s.turn}` });
   new TurnRunner(s, rng).runTurn(choices);
@@ -1384,4 +1992,44 @@ export function previewOrder(state: BattleState, choices: TurnChoices, rng: Rng 
   const runner = new TurnRunner(structuredClone(state), rng);
   runner.buildQueue(choices);
   return runner.queue.map((e) => e.mon.uid);
+}
+
+/** Sends in replacements for fainted Pokémon. `picks` maps replacementKey(position) to a team index. */
+export function applyReplacements(state: BattleState, picks: Record<string, number>, rng: Rng = mathRng): BattleState {
+  if (!state.pendingReplacements.length) return state;
+  const s = structuredClone(state);
+  new TurnRunner(s, rng).applyReplacements(picks);
+  return s;
+}
+
+/** Sets a Pokémon's current HP mid-battle (0 makes it faint; raising a fainted one's HP revives it). */
+export function setMonHp(state: BattleState, uid: string, hp: number, rng: Rng = mathRng): BattleState {
+  if (state.winner !== null) return state;
+  const s = structuredClone(state);
+  const mon = findMon(s, uid);
+  if (!mon) return state;
+  const value = Math.max(0, Math.min(mon.stats.hp, Math.round(hp)));
+  if (value === mon.currentHp) return state;
+  const wasFainted = mon.currentHp <= 0;
+  mon.currentHp = value;
+  if (wasFainted && value > 0) {
+    mon.faintLogged = false;
+    mon.status = null;
+    mon.charging = null;
+    mon.mustRecharge = false;
+  }
+  s.log.push({ turn: s.turn, kind: 'info', side: mon.side, text: `${mon.name}'s HP was set to ${value}/${mon.stats.hp} (${pct(value, mon.stats.hp)}).` });
+  const runner = new TurnRunner(s, rng);
+  if (!runner.checkFaints()) runner.computePending();
+  return s;
+}
+
+/** Ends the battle early; the field and log stay as they are. */
+export function endBattle(state: BattleState): BattleState {
+  if (state.winner !== null) return state;
+  const s = structuredClone(state);
+  s.winner = 'stopped';
+  s.pendingReplacements = [];
+  s.log.push({ turn: s.turn, kind: 'result', text: `The battle was stopped after ${s.turn} turn${s.turn === 1 ? '' : 's'}.` });
+  return s;
 }

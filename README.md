@@ -1,6 +1,6 @@
 # Battle Simulator
 
-A browser-based Pokémon-style battle simulator for singles (1v1) and doubles (2v2). Build Pokémon with custom stats, types, natures, IVs, EVs, abilities, held items and four fully customizable moves, then pick a move (and target) for each Pokémon every turn and watch the engine resolve it with the standard damage formula.
+A browser-based Pokémon-style battle simulator for singles and doubles with teams of up to six. Build Pokémon with custom stats, types, natures, IVs, EVs, abilities, held items and four fully customizable moves, then pick a move (and target) or a switch for each Pokémon every turn and watch the engine resolve it with the standard damage formula.
 
 ## Running it
 
@@ -21,20 +21,21 @@ The app is published with GitHub Pages at **https://swpricepersonal.github.io/po
 
 **Android:** open the link in Chrome and tap **Install app** (or ⋮ → **Add to Home screen**).
 
-Saved builds live on each device. To send builds to someone, use **Share** (or **Copy JSON**) under *My saved builds*; they use **Import JSON** to add them.
+Saved builds, moves and abilities live on each device. To send them to someone, use **Share** (or **Copy JSON**) under *My saved builds, moves and abilities*; they use **Import JSON** to add them. Files exported by older versions (a list of builds) still import.
 
 Updates arrive automatically: the next time the app is opened with a connection it picks up the newest version.
 
 ## Features
 
 - **Builder**: name, level (1–100), one or two of the 18 types, all 25 natures, base stats, IVs (0–31) and EVs (0–252 each, 510 total). Final stats update live.
-- **Formats**: singles (1v1) or doubles (2v2, all four on the field). Each player has two team slots; singles uses slot A. You can also start the battle with weather or terrain that lasts the whole battle.
-- **Abilities**: 101 preset abilities, or a **custom ability** built from generic effects (stat multipliers, a type power boost, a type immunity that can heal or raise a stat, a type resistance, STAB multiplier, super-effective damage reduction, crit immunity, status immunities, weather or terrain on entry, contact status or damage, Intimidate-style start effects and Speed Boost-style end-of-turn boosts).
-- **Held items** (59): Choice Band/Specs/Scarf, Life Orb, Expert Belt, Muscle Band, Wise Glasses, the 18 type-boosting items, Assault Vest, Eviolite, Focus Sash, the 18 resist berries, Leftovers, Black Sludge, Sitrus Berry, Oran Berry, Lum Berry, Shell Bell, Rocky Helmet, Heat/Damp/Smooth/Icy Rock, Terrain Extender and Light Clay.
-- **Moves**: pick from a 141-move library or make your own: type, Physical/Special/Status, power, accuracy (or never-miss), PP, priority, high crit ratio, flags (contact, punch, bite, pulse, sound, powder), and effects (status chance, stat-stage changes to the target or user, flinch, confusion, drain, recoil, healing, multi-hit, fixed damage), who the move targets, and an optional special behavior (Protect, Follow Me, Helping Hand, Tailwind, Trick Room, weather and terrain moves, Weather Ball, Instruct, Beat Up, etc.).
-- **Battle**: choose a move for each Pokémon (and a target in doubles), or use "Random moves", then run the turn. Each move button previews the min–max damage as a % of each foe's HP.
+- **Teams and formats**: each player brings 1–6 Pokémon. Singles puts the first one on the field, doubles the first two; the rest wait on the bench. Reorder, add and remove team members in the builder. You can also start the battle with weather or terrain that lasts the whole battle.
+- **Abilities**: 101 preset abilities, or a **custom ability** built from generic effects (stat multipliers, a type power boost, a type immunity that can heal or raise a stat, a type resistance, STAB multiplier, super-effective damage reduction, crit immunity, status immunities, Simple- and Contrary-style doubled or reversed stat changes, weather or terrain on entry, contact status or damage, Intimidate-style start effects and Speed Boost-style end-of-turn boosts). **Save ability** keeps a custom ability for reuse.
+- **Held items** (61): Choice Band/Specs/Scarf, Life Orb, Power Herb, Expert Belt, Muscle Band, Wise Glasses, the 18 type-boosting items, Assault Vest, Eviolite, Heavy-Duty Boots, Focus Sash, the 18 resist berries, Leftovers, Black Sludge, Sitrus Berry, Oran Berry, Lum Berry, Shell Bell, Rocky Helmet, Heat/Damp/Smooth/Icy Rock, Terrain Extender and Light Clay.
+- **Moves**: pick from a 198-move library or make your own: type, Physical/Special/Status, power, accuracy (or never-miss), PP, priority, high crit ratio, flags (contact, punch, bite, pulse, sound, powder), and effects (status chance, stat-stage changes to the target or user, flinch, confusion, drain, recoil, healing, multi-hit, fixed damage, Heal Block, adding or replacing the target's types, changing the target's ability, switching out after the move, forcing the target out, setting or clearing entry hazards, removing, stealing, swapping or giving items, charging on the first turn or recharging after, and what a Protect move does to an attacker that makes contact), who the move targets, and an optional special behavior (Protect, Follow Me, Helping Hand, Tailwind, Trick Room, Wonder Room, Magic Room, weather and terrain moves, Weather Ball, Instruct, Beat Up, etc.). A special move can also have regular effects (for example a Protect that raises Defense). **Save move** keeps a custom move for reuse in any slot.
+- **Battle**: choose a move or a switch for each Pokémon (and a target in doubles), or use "Random moves", then run the turn. Each move button previews the min–max damage as a % of each foe's HP. When a Pokémon faints and its player has healthy Pokémon left, they choose who to send in. **Set HP** on any Pokémon (on the field or the bench) changes its HP to a percentage of its max mid-battle (0% makes it faint).
+- **Stopping and resuming**: **End battle** stops a battle early and keeps the field and log on screen. **Back to builder** keeps the battle so you can **Resume** it; an unfinished battle is also restored if you close and reopen the app.
 - **Battle log**: game-style messages; click any damage line to see the full calculation.
-- **Saving**: both teams, the format, and a library of saved builds persist in your browser's local storage. Import/export the library as JSON.
+- **Saving**: both teams, the format, the battle in progress, and your saved builds, moves and abilities persist in your browser's local storage. Import/export them as JSON.
 
 ## Mechanics
 
@@ -65,11 +66,27 @@ Updates arrive automatically: the next time the app is opened with a connection 
 
 **Disable, Torment, Yawn, Perish Song**: Disable blocks the target's last-used move for 4 of its turns (including the current one if it hasn't moved yet); it goes through a Substitute. Torment stops the target from using the same move twice in a row for the rest of the battle. Yawn makes the target drowsy; it falls asleep at the end of the next turn unless it has gained a status by then (fails against Substitute, sleep immunity or an existing status). Perish Song gives every Pokémon on the field that hears it a perish count of 3; it falls by 1 at the end of each turn and the Pokémon faints at 0 (Soundproof is immune).
 
-**Not modeled**: bench Pokémon and switching (including switching moves), and other volatile conditions (Heal Block, Imprison, Embargo, etc.).
+**Switching**: a switch happens before any move (faster Pokémon first). Leaving the field clears stat changes, confusion, Taunt, Encore, Disable, Torment, Substitute, Leech Seed, Yawn, Perish Song, Heal Block, Choice locks, changed types and changed abilities; HP, status, PP and items stay (bad poison's counter restarts). A Pokémon that faints is replaced at the end of the turn, and a side loses when its whole team has fainted. U-turn, Volt Switch, Flip Turn, Parting Shot and Teleport switch the user out after the move (you pick who comes in when you choose the move); Baton Pass also passes stat changes, Substitute, confusion, Leech Seed and the perish count. Roar, Whirlwind, Dragon Tail and Circle Throw replace the target with a random healthy bench Pokémon (Dragon Tail doesn't get through a Substitute).
+
+**Entry hazards** hurt Pokémon that switch in: Stealth Rock (1/8 max HP × Rock effectiveness), Spikes (1/8, 1/6, 1/4 for 1–3 layers, grounded only), Toxic Spikes (poison, bad poison with 2 layers; a grounded Poison type absorbs them) and Sticky Web (−1 Speed). Stone Axe and Ceaseless Edge set them while attacking; Rapid Spin clears the user's side (and Leech Seed), Defog clears both sides and the foes' screens. Heavy-Duty Boots and Magic Guard prevent the damage.
+
+**Protect variants**: Spiky Shield (attacker loses 1/8), Baneful Bunker (poison), Burning Bulwark (burn), King's Shield (−1 Attack), Obstruct (−2 Defense) and Silk Trap (−1 Speed) punish contact moves; the last four only block damaging moves.
+
+**Ability and type changes**: Simple Beam, Worry Seed (wakes a sleeping target), Entrainment, Skill Swap and Gastro Acid change abilities; Trick-or-Treat and Forest's Curse add a type, Soak and Magic Powder replace the target's types. A new ability's entry effects (Intimidate, weather) trigger. Changes last until the Pokémon switches out.
+
+**Two-turn moves**: Solar Beam, Solar Blade, Sky Attack, Skull Bash (+1 Defense), Meteor Beam and Electro Shot (+1 Sp. Atk) charge on the first turn and attack on the second; the user is locked in and only spends PP once. Solar Beam and Solar Blade skip the charge in sun and have half power in rain, sand or snow; Electro Shot skips it in rain. Fly and Bounce (up high), Dig (underground), Dive (underwater) and Phantom Force (vanished) hide the user on the first turn, so most moves miss it: Thunder and Hurricane hit a flying Pokémon, Earthquake hits one underground and Surf one underwater, both for double damage, and No Guard hits anything. Phantom Force breaks through Protect. A Power Herb skips the charging turn once. Sleep, paralysis, flinching or switching out cancels the move. Hyper Beam and Giga Impact make the user skip its next turn if they hit.
+
+**Item moves**: Knock Off removes the target's item (×1.5 power if it has one), Thief and Covet steal it if the user has none, Trick and Switcheroo swap items (a Choice item handed over locks the target in), Bestow gives the user's item away, and Corrosive Gas removes everyone else's. Lost items stay lost when switching.
+
+**Heal Block** stops HP recovery (healing moves can't be chosen; drain, items, abilities, Leech Seed and Grassy Terrain don't heal) for 5 turns, or 2 from Psychic Noise.
+
+**Rooms**: Trick Room (slower Pokémon move first), Wonder Room (each Pokémon's Defense and Sp. Def stats swap for damage; stat stages don't) and Magic Room (held items have no effect) last 5 turns; using the move again ends it early.
+
+**Not modeled**: trapping (Arena Trap, Shadow Tag, binding moves), and other volatile conditions (Imprison, Embargo, etc.).
 
 ## Code layout
 
-- `src/engine/`: pure TypeScript battle engine (no UI): `stats.ts`, `typeChart.ts`, `modifiers.ts` (4096-based rounding), `abilities.ts`, `items.ts`, `damage.ts`, `battle.ts` (turn resolution for singles and doubles, weather, terrain and field effects, with an injectable RNG). Tests live in `engine.test.ts`, `field.test.ts` and `volatiles.test.ts`.
+- `src/engine/`: pure TypeScript battle engine (no UI): `stats.ts`, `typeChart.ts`, `modifiers.ts` (4096-based rounding), `abilities.ts`, `items.ts`, `damage.ts`, `battle.ts` (turn resolution for singles and doubles, weather, terrain and field effects, with an injectable RNG). Tests live in `engine.test.ts`, `field.test.ts`, `volatiles.test.ts` and `teams.test.ts`.
 - `src/data/presets.ts`: the move library and sample creatures.
 - `src/components/`: React UI (builder, move editor, battle view).
-- `src/storage.ts`: local storage persistence and JSON import validation.
+- `src/storage.ts`: local storage persistence (teams, saved builds, moves and abilities, the battle in progress) and JSON import validation.

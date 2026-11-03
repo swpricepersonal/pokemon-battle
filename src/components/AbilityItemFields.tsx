@@ -2,18 +2,24 @@ import { ABILITIES, ABILITY_NAMES, blankCustomAbility } from '../engine/abilitie
 import { ITEMS, ITEM_GROUPS } from '../engine/items';
 import { BOOSTABLE_STATS, BOOST_LABELS, CUSTOM_ABILITY, MAJOR_STATUSES, STATUS_LABELS, TERRAINS, TERRAIN_LABELS, TYPES, WEATHERS, WEATHER_LABELS } from '../engine/types';
 import type { BoostableStat, Boosts, CustomAbility, MajorStatus, PokemonBuild, Terrain, TypeName, Weather } from '../engine/types';
-import { NumField } from './common';
+import { NumField, StageSelect } from './common';
+import { canon, useSaved } from './saved';
 
 const ITEM_NAMES = Object.keys(ITEMS);
 
 export function AbilityItemFields({
   build, onChange, idPrefix,
 }: { build: PokemonBuild; onChange: (b: PokemonBuild) => void; idPrefix: string }) {
+  const saved = useSaved();
   const isCustom = build.ability === CUSTOM_ABILITY;
   const desc = isCustom ? 'Your own ability, built from the effects below.' : build.ability ? ABILITIES[build.ability]?.desc : '';
+  const savedIndex = isCustom ? saved.abilities.findIndex((a) => canon(a) === canon(build.customAbility)) : -1;
+  const value = savedIndex >= 0 ? `saved:${savedIndex}` : build.ability;
 
   function setAbility(value: string) {
-    if (value === CUSTOM_ABILITY) {
+    if (value.startsWith('saved:')) {
+      onChange({ ...build, ability: CUSTOM_ABILITY, customAbility: structuredClone(saved.abilities[Number(value.slice(6))]) });
+    } else if (value === CUSTOM_ABILITY) {
       onChange({ ...build, ability: value, customAbility: build.customAbility ?? blankCustomAbility() });
     } else {
       onChange({ ...build, ability: value });
@@ -24,9 +30,14 @@ export function AbilityItemFields({
     <div className="ability-item">
       <div className="ability-item-row">
         <label className="grow" htmlFor={`${idPrefix}-ability`}>Ability
-          <select id={`${idPrefix}-ability`} value={build.ability} onChange={(e) => setAbility(e.target.value)}>
+          <select id={`${idPrefix}-ability`} value={value} onChange={(e) => setAbility(e.target.value)}>
             <option value="">None</option>
-            <option value={CUSTOM_ABILITY}>Custom…</option>
+            <option value={CUSTOM_ABILITY}>{isCustom && savedIndex < 0 ? `Custom: ${build.customAbility?.name ?? ''}` : 'Custom…'}</option>
+            {saved.abilities.length > 0 && (
+              <optgroup label="My saved abilities">
+                {saved.abilities.map((a, i) => <option key={i} value={`saved:${i}`}>{a.name}</option>)}
+              </optgroup>
+            )}
             <optgroup label="Abilities">
               {ABILITY_NAMES.map((a) => <option key={a} value={a}>{a}</option>)}
             </optgroup>
@@ -90,8 +101,8 @@ function BoostRow({ label, value, onChange }: { label: string; value: Partial<Bo
       {BOOSTABLE_STATS.map((k) => (
         <label key={k} className="boost" title={BOOST_LABELS[k]}>
           {k === 'accuracy' ? 'Acc' : k === 'evasion' ? 'Eva' : k.toUpperCase()}
-          <NumField
-            value={value[k] ?? 0} min={-6} max={6}
+          <StageSelect
+            value={value[k] ?? 0} label={`${label}: ${BOOST_LABELS[k]}`}
             onChange={(n) => {
               const next = { ...value, [k]: n };
               if (!n) delete next[k];
@@ -105,10 +116,17 @@ function BoostRow({ label, value, onChange }: { label: string; value: Partial<Bo
 }
 
 function CustomAbilityEditor({ value: c, onChange }: { value: CustomAbility; onChange: (c: CustomAbility) => void }) {
+  const saved = useSaved();
   const set = <K extends keyof CustomAbility>(k: K, v: CustomAbility[K]) => onChange({ ...c, [k]: v });
+  const isSaved = saved.abilities.some((a) => canon(a) === canon(c));
   return (
     <div className="custom-ability">
-      <label>Ability name<input value={c.name} onChange={(e) => set('name', e.target.value)} /></label>
+      <div className="row custom-ability-head">
+        <label>Ability name<input value={c.name} onChange={(e) => set('name', e.target.value)} /></label>
+        <button className="small" disabled={isSaved} onClick={() => saved.saveAbility(c)} title="Keep this ability in your saved abilities">
+          {isSaved ? 'Saved' : 'Save ability'}
+        </button>
+      </div>
 
       <div className="effect-row">
         <span className="effect-label">Stat ×</span>
@@ -157,6 +175,16 @@ function CustomAbilityEditor({ value: c, onChange }: { value: CustomAbility; onC
         <label className="inline">STAB ×<MultField label="STAB multiplier" value={c.stabMultiplier} onChange={(n) => set('stabMultiplier', n)} /></label>
         <label className="inline">Super-effective damage taken ×<MultField label="Super-effective damage taken" value={c.superEffectiveTaken} onChange={(n) => set('superEffectiveTaken', n)} /></label>
         <label className="check-label"><input type="checkbox" checked={c.critImmune} onChange={(e) => set('critImmune', e.target.checked)} /> No critical hits</label>
+      </div>
+
+      <div className="effect-row">
+        <span className="effect-label">Stat changes</span>
+        <label className="check-label">
+          <input type="checkbox" checked={!!c.simple} onChange={(e) => set('simple', e.target.checked)} /> Doubled (Simple)
+        </label>
+        <label className="check-label">
+          <input type="checkbox" checked={!!c.contrary} onChange={(e) => set('contrary', e.target.checked)} /> Reversed (Contrary)
+        </label>
       </div>
 
       <div className="effect-row">

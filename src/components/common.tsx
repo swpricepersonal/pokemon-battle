@@ -59,3 +59,19 @@ export function NumField({
     />
   );
 }
+
+/**
+ * Picker for small signed numbers (stat stages, priority). A select instead of a number field, because
+ * phone number pads have no minus key, which made negative values impossible to type.
+ */
+export function StageSelect({
+  value, onChange, min = -6, max = 6, label, className,
+}: { value: number; onChange: (n: number) => void; min?: number; max?: number; label?: string; className?: string }) {
+  const options: number[] = [];
+  for (let n = max; n >= min; n--) options.push(n);
+  return (
+    <select className={`stage ${className ?? ''}`} value={value} aria-label={label} onChange={(e) => onChange(Number(e.target.value))}>
+      {options.map((n) => <option key={n} value={n}>{n > 0 ? `+${n}` : n}</option>)}
+    </select>
+  );
+}

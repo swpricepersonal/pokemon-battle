@@ -1,8 +1,12 @@
+import { COPY_USER_ABILITY, SWAP_ABILITIES } from '../engine/types';
 import type { Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, PokemonBuild, StatTable, TypeName } from '../engine/types';
 
-/** Default target: status moves that only affect the user target 'self', everything else one Pokémon. */
+/** Default target: hazard moves the field, status moves that only affect the user 'self', everything else one Pokémon. */
 export function defaultMoveTarget(category: MoveCategory, effects: MoveEffects): MoveTarget {
-  return category === 'Status' && !effects.status && !effects.targetBoosts && !effects.confuse ? 'self' : 'normal';
+  if (category !== 'Status') return 'normal';
+  if (effects.hazard) return 'field';
+  const e = effects;
+  return e.status || e.targetBoosts || e.confuse || e.healBlock || e.typeChange || e.targetAbility || e.forceSwitch || e.itemChange ? 'normal' : 'self';
 }
 
 /** Move flags by name, so library entries stay one line each. */
@@ -12,13 +16,15 @@ const FLAG_LISTS: Record<MoveFlag, string[]> = {
     'Super Fang', 'Flare Blitz', 'Fire Punch', 'Aqua Jet', 'Waterfall', 'Wild Charge', 'Thunder Punch', 'Leaf Blade',
     'Ice Punch', 'Close Combat', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Seismic Toss', 'Poison Jab', 'High Horsepower',
     'Brave Bird', 'Dual Wingbeat', 'Zen Headbutt', 'X-Scissor', 'Shadow Sneak', 'Dragon Claw', 'Crunch', 'Iron Head',
-    'Bullet Punch', 'Play Rough',
+    'Bullet Punch', 'Play Rough', 'U-turn', 'Flip Turn', 'Dragon Tail', 'Circle Throw', 'Rapid Spin', 'Stone Axe',
+    'Ceaseless Edge', 'Solar Blade', 'Fly', 'Bounce', 'Dig', 'Dive', 'Phantom Force', 'Skull Bash', 'Giga Impact', 'Knock Off',
+    'Thief', 'Covet',
   ],
   punch: ['Fire Punch', 'Thunder Punch', 'Ice Punch', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Bullet Punch'],
   bite: ['Crunch'],
   pulse: ['Water Pulse', 'Aura Sphere', 'Dragon Pulse', 'Dark Pulse', 'Heal Pulse'],
-  sound: ['Hyper Voice', 'Bug Buzz', 'Snarl', 'Growl', 'Screech', 'Perish Song'],
-  powder: ['Spore', 'Rage Powder'],
+  sound: ['Hyper Voice', 'Bug Buzz', 'Snarl', 'Growl', 'Screech', 'Perish Song', 'Parting Shot', 'Roar', 'Psychic Noise'],
+  powder: ['Spore', 'Rage Powder', 'Magic Powder'],
 };
 
 function flagsFor(name: string): MoveFlag[] {
@@ -207,6 +213,70 @@ export const MOVE_LIBRARY: Move[] = [
   mv('After You', 'Normal', 'Status', 0, null, 15, { target: 'normal', special: 'afterYou' }),
   mv('Howl', 'Normal', 'Status', 0, null, 40, { target: 'selfAndAlly', effects: { targetBoosts: { boosts: { atk: 1 }, chance: 100 } } }),
   mv('Life Dew', 'Water', 'Status', 0, null, 10, { target: 'selfAndAlly', effects: { heal: 25 } }),
+  // Protect variants that punish contact
+  mv('Spiky Shield', 'Grass', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectContact: { damage: 12.5 } } }),
+  mv('Baneful Bunker', 'Poison', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectContact: { status: 'psn' } } }),
+  mv('Burning Bulwark', 'Fire', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectAttacksOnly: true, protectContact: { status: 'brn' } } }),
+  mv("King's Shield", 'Steel', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectAttacksOnly: true, protectContact: { boosts: { atk: -1 } } } }),
+  mv('Obstruct', 'Dark', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectAttacksOnly: true, protectContact: { boosts: { def: -2 } } } }),
+  mv('Silk Trap', 'Bug', 'Status', 0, null, 10, { priority: 4, special: 'protect', effects: { protectAttacksOnly: true, protectContact: { boosts: { spe: -1 } } } }),
+  // Ability and type changes
+  mv('Simple Beam', 'Normal', 'Status', 0, 100, 15, { effects: { targetAbility: { ability: 'Simple' } } }),
+  mv('Worry Seed', 'Grass', 'Status', 0, 100, 10, { effects: { targetAbility: { ability: 'Insomnia' } } }),
+  mv('Entrainment', 'Normal', 'Status', 0, 100, 15, { effects: { targetAbility: { ability: COPY_USER_ABILITY } } }),
+  mv('Skill Swap', 'Psychic', 'Status', 0, null, 10, { effects: { targetAbility: { ability: SWAP_ABILITIES } } }),
+  mv('Gastro Acid', 'Poison', 'Status', 0, 100, 10, { effects: { targetAbility: { ability: '' } } }),
+  mv('Trick-or-Treat', 'Ghost', 'Status', 0, 100, 20, { effects: { typeChange: { mode: 'add', types: ['Ghost'] } } }),
+  mv("Forest's Curse", 'Grass', 'Status', 0, 100, 20, { effects: { typeChange: { mode: 'add', types: ['Grass'] } } }),
+  mv('Soak', 'Water', 'Status', 0, 100, 20, { effects: { typeChange: { mode: 'replace', types: ['Water'] } } }),
+  mv('Magic Powder', 'Psychic', 'Status', 0, 100, 20, { effects: { typeChange: { mode: 'replace', types: ['Psychic'] } } }),
+  // Heal Block and rooms
+  mv('Heal Block', 'Psychic', 'Status', 0, 100, 15, { ...FOES, effects: { healBlock: 5 } }),
+  mv('Psychic Noise', 'Psychic', 'Special', 75, 100, 10, { effects: { healBlock: 2 } }),
+  mv('Wonder Room', 'Psychic', 'Status', 0, null, 10, { target: 'field', special: 'wonderRoom' }),
+  mv('Magic Room', 'Psychic', 'Status', 0, null, 10, { target: 'field', special: 'magicRoom' }),
+  // Switching out and forcing switches
+  mv('U-turn', 'Bug', 'Physical', 70, 100, 20, { effects: { selfSwitch: 'switch' } }),
+  mv('Volt Switch', 'Electric', 'Special', 70, 100, 20, { effects: { selfSwitch: 'switch' } }),
+  mv('Flip Turn', 'Water', 'Physical', 60, 100, 20, { effects: { selfSwitch: 'switch' } }),
+  mv('Parting Shot', 'Dark', 'Status', 0, 100, 20, { effects: { targetBoosts: { boosts: { atk: -1, spa: -1 }, chance: 100 }, selfSwitch: 'switch' } }),
+  mv('Baton Pass', 'Normal', 'Status', 0, null, 40, { effects: { selfSwitch: 'batonPass' } }),
+  mv('Teleport', 'Psychic', 'Status', 0, null, 20, { priority: -6, effects: { selfSwitch: 'switch' } }),
+  mv('Roar', 'Normal', 'Status', 0, null, 20, { priority: -6, effects: { forceSwitch: true } }),
+  mv('Whirlwind', 'Normal', 'Status', 0, null, 20, { priority: -6, effects: { forceSwitch: true } }),
+  mv('Dragon Tail', 'Dragon', 'Physical', 60, 90, 10, { priority: -6, effects: { forceSwitch: true } }),
+  mv('Circle Throw', 'Fighting', 'Physical', 60, 90, 10, { priority: -6, effects: { forceSwitch: true } }),
+  // Entry hazards
+  mv('Stealth Rock', 'Rock', 'Status', 0, null, 20, { effects: { hazard: 'stealthRock' } }),
+  mv('Spikes', 'Ground', 'Status', 0, null, 20, { effects: { hazard: 'spikes' } }),
+  mv('Toxic Spikes', 'Poison', 'Status', 0, null, 20, { effects: { hazard: 'toxicSpikes' } }),
+  mv('Sticky Web', 'Bug', 'Status', 0, null, 20, { effects: { hazard: 'stickyWeb' } }),
+  mv('Stone Axe', 'Rock', 'Physical', 65, 90, 15, { highCrit: true, effects: { hazard: 'stealthRock' } }),
+  mv('Ceaseless Edge', 'Dark', 'Physical', 65, 90, 15, { highCrit: true, effects: { hazard: 'spikes' } }),
+  mv('Rapid Spin', 'Normal', 'Physical', 50, 100, 40, { effects: { clearHazards: 'own', selfBoosts: { boosts: { spe: 1 }, chance: 100 } } }),
+  mv('Defog', 'Flying', 'Status', 0, null, 15, { effects: { clearHazards: 'both', targetBoosts: { boosts: { evasion: -1 }, chance: 100 } } }),
+  // Two-turn and recharge moves
+  mv('Solar Beam', 'Grass', 'Special', 120, 100, 10, { effects: { charge: { skipIn: 'sun' } } }),
+  mv('Solar Blade', 'Grass', 'Physical', 125, 100, 10, { effects: { charge: { skipIn: 'sun' } } }),
+  mv('Fly', 'Flying', 'Physical', 90, 95, 15, { effects: { charge: { hide: 'air' } } }),
+  mv('Bounce', 'Flying', 'Physical', 85, 85, 5, { effects: { charge: { hide: 'air' }, status: { status: 'par', chance: 30 } } }),
+  mv('Dig', 'Ground', 'Physical', 80, 100, 10, { effects: { charge: { hide: 'underground' } } }),
+  mv('Dive', 'Water', 'Physical', 80, 100, 10, { effects: { charge: { hide: 'underwater' } } }),
+  mv('Phantom Force', 'Ghost', 'Physical', 90, 100, 10, { effects: { charge: { hide: 'vanished' } } }),
+  mv('Sky Attack', 'Flying', 'Physical', 140, 90, 5, { highCrit: true, effects: { charge: {}, flinch: 30 } }),
+  mv('Skull Bash', 'Normal', 'Physical', 130, 100, 10, { effects: { charge: { boosts: { def: 1 } } } }),
+  mv('Meteor Beam', 'Rock', 'Special', 120, 90, 10, { effects: { charge: { boosts: { spa: 1 } } } }),
+  mv('Electro Shot', 'Electric', 'Special', 130, 100, 10, { effects: { charge: { skipIn: 'rain', boosts: { spa: 1 } } } }),
+  mv('Hyper Beam', 'Normal', 'Special', 150, 90, 5, { effects: { recharge: true } }),
+  mv('Giga Impact', 'Normal', 'Physical', 150, 90, 5, { effects: { recharge: true } }),
+  // Item-changing moves
+  mv('Knock Off', 'Dark', 'Physical', 65, 100, 20, { effects: { itemChange: 'remove', itemBoost: true } }),
+  mv('Thief', 'Dark', 'Physical', 60, 100, 25, { effects: { itemChange: 'steal' } }),
+  mv('Covet', 'Normal', 'Physical', 60, 100, 25, { effects: { itemChange: 'steal' } }),
+  mv('Trick', 'Psychic', 'Status', 0, 100, 10, { effects: { itemChange: 'swap' } }),
+  mv('Switcheroo', 'Dark', 'Status', 0, 100, 10, { effects: { itemChange: 'swap' } }),
+  mv('Bestow', 'Normal', 'Status', 0, null, 15, { effects: { itemChange: 'give' } }),
+  mv('Corrosive Gas', 'Poison', 'Status', 0, 100, 40, { ...ALL, effects: { itemChange: 'remove' } }),
 ];
 
 export function findMove(name: string): Move {

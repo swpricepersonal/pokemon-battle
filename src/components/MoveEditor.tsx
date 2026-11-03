@@ -1,29 +1,32 @@
+import { ABILITY_NAMES } from '../engine/abilities';
 import { MOVE_LIBRARY } from '../data/presets';
-import { BOOSTABLE_STATS, BOOST_LABELS, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, TYPES } from '../engine/types';
-import type { Boosts, MajorStatus, Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, TypeName } from '../engine/types';
-import { NumField, TypeBadge } from './common';
+import {
+  BOOSTABLE_STATS, BOOST_LABELS, COPY_USER_ABILITY, CUSTOM_ABILITY, HAZARDS, HAZARD_LABELS, HIDDEN_LABELS, HIDDEN_STATES, MAJOR_STATUSES,
+  MOVE_FLAGS, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, SWAP_ABILITIES, TYPES, WEATHERS,
+  WEATHER_LABELS,
+} from '../engine/types';
+import type {
+  Boosts, Hazard, Hidden, ItemChange, MajorStatus, Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, TypeName, Weather,
+} from '../engine/types';
+import { NumField, StageSelect, TypeBadge } from './common';
+import { canon, useSaved } from './saved';
 
 const CATEGORIES: MoveCategory[] = ['Physical', 'Special', 'Status'];
-
-/** JSON with sorted keys, so moves compare equal regardless of property order. */
-function canon(v: unknown): string {
-  if (v && typeof v === 'object' && !Array.isArray(v)) {
-    const o = v as Record<string, unknown>;
-    return `{${Object.keys(o).filter((k) => o[k] !== undefined).sort().map((k) => `${k}:${canon(o[k])}`).join(',')}}`;
-  }
-  return JSON.stringify(v);
-}
 const LIBRARY_KEYS = MOVE_LIBRARY.map(canon);
 
 export function MoveEditor({
   slot, move, onChange,
 }: { slot: number; move: Move | null; onChange: (m: Move | null) => void }) {
-  const libraryIndex = move ? LIBRARY_KEYS.indexOf(canon(move)) : -1;
-  const presetValue = !move ? 'empty' : libraryIndex >= 0 ? String(libraryIndex) : 'custom';
+  const saved = useSaved();
+  const key = move ? canon(move) : '';
+  const libraryIndex = move ? LIBRARY_KEYS.indexOf(key) : -1;
+  const savedIndex = move && libraryIndex < 0 ? saved.moves.findIndex((m) => canon(m) === key) : -1;
+  const presetValue = !move ? 'empty' : libraryIndex >= 0 ? String(libraryIndex) : savedIndex >= 0 ? `saved:${savedIndex}` : 'custom';
 
   function pick(value: string) {
     if (value === 'empty') onChange(null);
     else if (value === 'custom') onChange(move ?? { ...structuredClone(MOVE_LIBRARY[0]), name: 'Custom Move' });
+    else if (value.startsWith('saved:')) onChange(structuredClone(saved.moves[Number(value.slice(6))]));
     else onChange(structuredClone(MOVE_LIBRARY[Number(value)]));
   }
 
@@ -36,7 +39,12 @@ export function MoveEditor({
         <span className="slot">Move {slot + 1}</span>
         <select value={presetValue} onChange={(e) => pick(e.target.value)} aria-label={`Move ${slot + 1} preset`}>
           <option value="empty">(empty)</option>
-          <option value="custom">Custom…</option>
+          <option value="custom">{presetValue === 'custom' ? `Custom: ${move?.name}` : 'Custom…'}</option>
+          {saved.moves.length > 0 && (
+            <optgroup label="My saved moves">
+              {saved.moves.map((m, i) => <option key={i} value={`saved:${i}`}>{m.name}</option>)}
+            </optgroup>
+          )}
           {TYPES.map((t) => {
             const moves = MOVE_LIBRARY.map((m, i) => [m, i] as const).filter(([m]) => m.type === t);
             if (!moves.length) return null;
@@ -48,6 +56,9 @@ export function MoveEditor({
           })}
         </select>
         {move && <TypeBadge type={move.type} small />}
+        {move && presetValue === 'custom' && (
+          <button className="small" onClick={() => saved.saveMove(move)} title="Keep this move in your saved moves">Save move</button>
+        )}
       </div>
 
       {move && (
@@ -76,7 +87,7 @@ export function MoveEditor({
               </span>
             </label>
             <label>PP<NumField value={move.pp} min={1} max={64} onChange={(n) => set('pp', n)} /></label>
-            <label>Priority<NumField value={move.priority} min={-7} max={5} onChange={(n) => set('priority', n)} /></label>
+            <label>Priority<StageSelect value={move.priority} min={-7} max={5} onChange={(n) => set('priority', n)} /></label>
             <label className="check-label">
               <input type="checkbox" checked={move.highCrit} onChange={(e) => set('highCrit', e.target.checked)} />
               High crit
@@ -116,19 +127,34 @@ export function MoveEditor({
               </label>
             ))}
           </div>
-          <EffectsEditor effects={move.effects} isStatus={move.category === 'Status'} onChange={setEffects} />
+          <EffectsEditor effects={move.effects} isStatus={move.category === 'Status'} isProtect={move.special === 'protect'} onChange={setEffects} />
         </>
       )}
     </div>
   );
 }
 
+const fmtBoosts = (b: Partial<Boosts>) => Object.entries(b).filter(([, v]) => v).map(([k, v]) => `${v! > 0 ? '+' : ''}${v} ${k}`).join(' ');
+
+const ITEM_CHANGE_LABELS: Record<ItemChange, string> = {
+  remove: 'Removes the target’s item (Knock Off)',
+  steal: 'Steals the target’s item (Thief)',
+  swap: 'Swaps items with the target (Trick)',
+  give: 'Gives the user’s item to the target (Bestow)',
+};
+
+function abilityLabel(a: NonNullable<MoveEffects['targetAbility']>): string {
+  if (a.ability === '') return 'removes ability';
+  if (a.ability === COPY_USER_ABILITY) return 'gives user’s ability';
+  if (a.ability === SWAP_ABILITIES) return 'swaps abilities';
+  return `ability → ${a.ability === CUSTOM_ABILITY ? a.customAbility?.name ?? 'custom' : a.ability}`;
+}
+
 function summarize(e: MoveEffects): string {
   const parts: string[] = [];
   if (e.status) parts.push(`${e.status.chance}% ${STATUS_LABELS[e.status.status]}`);
-  const fmt = (b: Partial<Boosts>) => Object.entries(b).filter(([, v]) => v).map(([k, v]) => `${v! > 0 ? '+' : ''}${v} ${k}`).join(' ');
-  if (e.targetBoosts) parts.push(`foe ${fmt(e.targetBoosts.boosts)} (${e.targetBoosts.chance}%)`);
-  if (e.selfBoosts) parts.push(`self ${fmt(e.selfBoosts.boosts)} (${e.selfBoosts.chance}%)`);
+  if (e.targetBoosts) parts.push(`target ${fmtBoosts(e.targetBoosts.boosts)} (${e.targetBoosts.chance}%)`);
+  if (e.selfBoosts) parts.push(`self ${fmtBoosts(e.selfBoosts.boosts)} (${e.selfBoosts.chance}%)`);
   if (e.drain) parts.push(`drain ${e.drain}%`);
   if (e.recoil) parts.push(`recoil ${e.recoil}%`);
   if (e.heal) parts.push(`heal ${e.heal}%`);
@@ -136,12 +162,28 @@ function summarize(e: MoveEffects): string {
   if (e.confuse) parts.push(`${e.confuse}% confuse`);
   if (e.multiHit) parts.push(e.multiHit[0] === e.multiHit[1] ? `${e.multiHit[0]} hits` : `${e.multiHit[0]}–${e.multiHit[1]} hits`);
   if (e.fixedDamage !== undefined) parts.push(e.fixedDamage === 'level' ? 'damage = level' : e.fixedDamage === 'halfHp' ? 'halves HP' : `${e.fixedDamage} fixed damage`);
+  if (e.healBlock) parts.push(`Heal Block ${e.healBlock} turns`);
+  if (e.typeChange) parts.push(`${e.typeChange.mode === 'add' ? 'adds' : 'becomes'} ${e.typeChange.types.join('/')}`);
+  if (e.targetAbility) parts.push(abilityLabel(e.targetAbility));
+  if (e.protectContact) {
+    const c = e.protectContact;
+    parts.push(`on contact: ${[c.damage ? `${c.damage}% HP` : '', c.status ? STATUS_LABELS[c.status] : '', c.boosts ? fmtBoosts(c.boosts) : ''].filter(Boolean).join(', ')}`);
+  }
+  if (e.protectAttacksOnly) parts.push('blocks attacks only');
+  if (e.hazard) parts.push(`sets ${HAZARD_LABELS[e.hazard]}`);
+  if (e.clearHazards) parts.push(e.clearHazards === 'own' ? 'clears own hazards' : 'clears all hazards');
+  if (e.selfSwitch) parts.push(e.selfSwitch === 'batonPass' ? 'Baton Pass' : 'user switches out');
+  if (e.forceSwitch) parts.push('forces a switch');
+  if (e.charge) parts.push(`charges first${e.charge.hide ? `, hides ${HIDDEN_LABELS[e.charge.hide].split(' (')[0]}` : ''}${e.charge.skipIn ? `, instant in ${WEATHER_LABELS[e.charge.skipIn].toLowerCase()}` : ''}${e.charge.boosts ? ` (${fmtBoosts(e.charge.boosts)})` : ''}`);
+  if (e.recharge) parts.push('must recharge');
+  if (e.itemChange) parts.push(ITEM_CHANGE_LABELS[e.itemChange].split(' (')[0].toLowerCase());
+  if (e.itemBoost) parts.push('×1.5 vs held item');
   return parts.join(', ') || 'none';
 }
 
 function EffectsEditor({
-  effects, isStatus, onChange,
-}: { effects: MoveEffects; isStatus: boolean; onChange: (e: MoveEffects) => void }) {
+  effects, isStatus, isProtect, onChange,
+}: { effects: MoveEffects; isStatus: boolean; isProtect: boolean; onChange: (e: MoveEffects) => void }) {
   const update = (patch: Partial<MoveEffects>) => {
     const next = { ...effects, ...patch };
     for (const k of Object.keys(next) as (keyof MoveEffects)[]) if (next[k] === undefined) delete next[k];
@@ -193,6 +235,7 @@ function EffectsEditor({
             <label className="inline">Heal target <NumField value={effects.heal ?? 0} min={0} max={100} onChange={(n) => update({ heal: n || undefined })} />% max HP</label>
           )}
           <label className="inline">Confuse <NumField value={effects.confuse ?? 0} min={0} max={100} onChange={(n) => update({ confuse: n || undefined })} />%</label>
+          <label className="inline" title="The target can't restore HP for this many turns">Heal Block <NumField value={effects.healBlock ?? 0} min={0} max={10} onChange={(n) => update({ healBlock: n || undefined })} /> turns</label>
         </div>
         {!isStatus && (
           <div className="effect-row">
@@ -226,8 +269,230 @@ function EffectsEditor({
             </label>
           </div>
         )}
+        <TypeChangeEditor value={effects.typeChange} onChange={(typeChange) => update({ typeChange })} />
+        <AbilityChangeEditor value={effects.targetAbility} onChange={(targetAbility) => update({ targetAbility })} />
+        <div className="effect-row">
+          <span className="effect-label">Switching</span>
+          <select
+            value={effects.selfSwitch ?? ''} aria-label="User switches out"
+            onChange={(e) => update({ selfSwitch: (e.target.value || undefined) as MoveEffects['selfSwitch'] })}
+          >
+            <option value="">User stays in</option>
+            <option value="switch">User switches out after (U-turn)</option>
+            <option value="batonPass">User switches out, passing stat changes (Baton Pass)</option>
+          </select>
+          <label className="check-label">
+            <input type="checkbox" checked={!!effects.forceSwitch} onChange={(e) => update({ forceSwitch: e.target.checked || undefined })} />
+            Forces the target out (Roar)
+          </label>
+        </div>
+        <div className="effect-row">
+          <span className="effect-label">Hazards</span>
+          <select value={effects.hazard ?? ''} aria-label="Hazard it sets" onChange={(e) => update({ hazard: (e.target.value || undefined) as Hazard | undefined })}>
+            <option value="">Sets no hazard</option>
+            {HAZARDS.map((h) => <option key={h} value={h}>Sets {HAZARD_LABELS[h]} on the foes’ side</option>)}
+          </select>
+          <select
+            value={effects.clearHazards ?? ''} aria-label="Hazards it removes"
+            onChange={(e) => update({ clearHazards: (e.target.value || undefined) as MoveEffects['clearHazards'] })}
+          >
+            <option value="">Removes no hazards</option>
+            <option value="own">Removes hazards from the user’s side (Rapid Spin)</option>
+            <option value="both">Removes hazards from both sides (Defog)</option>
+          </select>
+        </div>
+        <div className="effect-row">
+          <span className="effect-label">Items</span>
+          <select value={effects.itemChange ?? ''} aria-label="Item change" onChange={(e) => update({ itemChange: (e.target.value || undefined) as ItemChange | undefined })}>
+            <option value="">Doesn’t touch items</option>
+            {(Object.keys(ITEM_CHANGE_LABELS) as ItemChange[]).map((k) => <option key={k} value={k}>{ITEM_CHANGE_LABELS[k]}</option>)}
+          </select>
+          {!isStatus && (
+            <label className="check-label">
+              <input type="checkbox" checked={!!effects.itemBoost} onChange={(e) => update({ itemBoost: e.target.checked || undefined })} />
+              ×1.5 power if the target holds an item
+            </label>
+          )}
+        </div>
+        <ChargeEditor effects={effects} update={update} isStatus={isStatus} />
+        {isProtect && <ProtectEditor effects={effects} update={update} />}
       </div>
     </details>
+  );
+}
+
+function TypeChangeEditor({ value, onChange }: { value: MoveEffects['typeChange']; onChange: (v: MoveEffects['typeChange']) => void }) {
+  const types = value?.types ?? ['Ghost'];
+  return (
+    <div className="effect-row">
+      <span className="effect-label">Target type</span>
+      <select
+        value={value?.mode ?? ''} aria-label="Type change"
+        onChange={(e) => onChange(e.target.value ? { mode: e.target.value as 'add' | 'replace', types: types.slice(0, e.target.value === 'add' ? 1 : 2) } : undefined)}
+      >
+        <option value="">No change</option>
+        <option value="add">Adds a type (Trick-or-Treat)</option>
+        <option value="replace">Becomes a new type (Soak)</option>
+      </select>
+      {value && (
+        <>
+          <select value={types[0]} aria-label="New type" onChange={(e) => onChange({ ...value, types: [e.target.value as TypeName, ...types.slice(1)] })}>
+            {TYPES.map((t) => <option key={t}>{t}</option>)}
+          </select>
+          {value.mode === 'replace' && (
+            <select
+              value={types[1] ?? ''} aria-label="Second new type"
+              onChange={(e) => onChange({ ...value, types: e.target.value ? [types[0], e.target.value as TypeName] : [types[0]] })}
+            >
+              <option value="">(one type)</option>
+              {TYPES.filter((t) => t !== types[0]).map((t) => <option key={t}>{t}</option>)}
+            </select>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function AbilityChangeEditor({ value, onChange }: { value: MoveEffects['targetAbility']; onChange: (v: MoveEffects['targetAbility']) => void }) {
+  const saved = useSaved();
+  let current = '';
+  if (value) {
+    if (value.ability === CUSTOM_ABILITY) {
+      const i = saved.abilities.findIndex((a) => canon(a) === canon(value.customAbility));
+      current = i >= 0 ? `saved:${i}` : 'custom';
+    } else current = value.ability === '' ? '@none' : value.ability;
+  }
+  function pick(v: string) {
+    if (!v) onChange(undefined);
+    else if (v === '@none') onChange({ ability: '' });
+    else if (v === 'custom') return;
+    else if (v.startsWith('saved:')) onChange({ ability: CUSTOM_ABILITY, customAbility: structuredClone(saved.abilities[Number(v.slice(6))]) });
+    else onChange({ ability: v });
+  }
+  return (
+    <div className="effect-row">
+      <span className="effect-label">Target ability</span>
+      <select value={current} aria-label="Ability change" onChange={(e) => pick(e.target.value)}>
+        <option value="">No change</option>
+        <option value="@none">Removes its ability (Gastro Acid)</option>
+        <option value={COPY_USER_ABILITY}>Gets the user’s ability (Entrainment)</option>
+        <option value={SWAP_ABILITIES}>Swaps abilities with the user (Skill Swap)</option>
+        {current === 'custom' && <option value="custom">Custom: {value?.customAbility?.name}</option>}
+        {saved.abilities.length > 0 && (
+          <optgroup label="Becomes one of my saved abilities">
+            {saved.abilities.map((a, i) => <option key={i} value={`saved:${i}`}>{a.name}</option>)}
+          </optgroup>
+        )}
+        <optgroup label="Becomes">
+          {ABILITY_NAMES.map((a) => <option key={a} value={a}>{a}</option>)}
+        </optgroup>
+      </select>
+      {saved.abilities.length === 0 && <span className="muted hint">Save a custom ability to hand it out with a move.</span>}
+    </div>
+  );
+}
+
+function ChargeEditor({ effects, update, isStatus }: { effects: MoveEffects; update: (p: Partial<MoveEffects>) => void; isStatus: boolean }) {
+  const c = effects.charge;
+  const setC = (patch: Partial<NonNullable<MoveEffects['charge']>>) => {
+    const next = { ...c, ...patch };
+    for (const k of Object.keys(next) as (keyof typeof next)[]) if (!next[k]) delete next[k];
+    update({ charge: next });
+  };
+  const boosts = c?.boosts ?? {};
+  return (
+    <>
+      <div className="effect-row">
+        <span className="effect-label">Two turns</span>
+        <select
+          value={c ? 'charge' : effects.recharge ? 'recharge' : ''} aria-label="Two-turn move"
+          onChange={(e) => update({
+            charge: e.target.value === 'charge' ? c ?? {} : undefined,
+            recharge: e.target.value === 'recharge' || undefined,
+          })}
+        >
+          <option value="">Acts in one turn</option>
+          <option value="charge">Charges on turn 1, attacks on turn 2 (Solar Beam)</option>
+          {!isStatus && <option value="recharge">Attacks, then must recharge next turn (Hyper Beam)</option>}
+        </select>
+        {c && (
+          <>
+            <select value={c.hide ?? ''} aria-label="Where the user hides while charging" onChange={(e) => setC({ hide: (e.target.value || undefined) as Hidden | undefined })}>
+              <option value="">Stays in view while charging</option>
+              {HIDDEN_STATES.map((h) => <option key={h} value={h}>Hides {HIDDEN_LABELS[h]}</option>)}
+            </select>
+            <select value={c.skipIn ?? ''} aria-label="Weather that skips the charge" onChange={(e) => setC({ skipIn: (e.target.value || undefined) as Weather | undefined })}>
+              <option value="">Always charges</option>
+              {WEATHERS.map((w) => <option key={w} value={w}>No charge in {WEATHER_LABELS[w].toLowerCase()}</option>)}
+            </select>
+          </>
+        )}
+      </div>
+      {c && (
+        <div className="effect-row boosts">
+          <span className="effect-label">Stats while charging</span>
+          {BOOSTABLE_STATS.map((k) => (
+            <label key={k} className="boost" title={BOOST_LABELS[k]}>
+              {k === 'accuracy' ? 'Acc' : k === 'evasion' ? 'Eva' : k.toUpperCase()}
+              <StageSelect
+                value={boosts[k] ?? 0} label={`Charging: ${BOOST_LABELS[k]}`}
+                onChange={(n) => {
+                  const next = { ...boosts, [k]: n };
+                  if (!n) delete next[k];
+                  setC({ boosts: Object.keys(next).length ? next : undefined });
+                }}
+              />
+            </label>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ProtectEditor({ effects, update }: { effects: MoveEffects; update: (p: Partial<MoveEffects>) => void }) {
+  const c = effects.protectContact ?? {};
+  const setC = (patch: Partial<NonNullable<MoveEffects['protectContact']>>) => {
+    const next = { ...c, ...patch };
+    for (const k of Object.keys(next) as (keyof typeof next)[]) if (!next[k]) delete next[k];
+    update({ protectContact: Object.keys(next).length ? next : undefined });
+  };
+  const boosts = c.boosts ?? {};
+  return (
+    <div className="protect-editor">
+      <div className="effect-row">
+        <span className="effect-label">Protect</span>
+        <label className="check-label">
+          <input type="checkbox" checked={!!effects.protectAttacksOnly} onChange={(e) => update({ protectAttacksOnly: e.target.checked || undefined })} />
+          Only blocks damaging moves (King’s Shield)
+        </label>
+      </div>
+      <div className="effect-row">
+        <span className="effect-label">If a blocked move made contact</span>
+        <label className="inline">Attacker loses <NumField value={c.damage ?? 0} min={0} max={100} onChange={(n) => setC({ damage: n || undefined })} />% HP</label>
+        <select value={c.status ?? ''} aria-label="Status on contact" onChange={(e) => setC({ status: (e.target.value || undefined) as MajorStatus | undefined })}>
+          <option value="">No status</option>
+          {MAJOR_STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
+        </select>
+      </div>
+      <div className="effect-row boosts">
+        <span className="effect-label">Attacker’s stats</span>
+        {BOOSTABLE_STATS.map((k) => (
+          <label key={k} className="boost" title={BOOST_LABELS[k]}>
+            {k === 'accuracy' ? 'Acc' : k === 'evasion' ? 'Eva' : k.toUpperCase()}
+            <StageSelect
+              value={boosts[k] ?? 0} label={`Attacker ${BOOST_LABELS[k]}`}
+              onChange={(n) => {
+                const next = { ...boosts, [k]: n };
+                if (!n) delete next[k];
+                setC({ boosts: Object.keys(next).length ? next : undefined });
+              }}
+            />
+          </label>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -252,7 +517,7 @@ function BoostsEditor({
       {BOOSTABLE_STATS.map((k) => (
         <label key={k} className="boost" title={BOOST_LABELS[k]}>
           {k === 'accuracy' ? 'Acc' : k === 'evasion' ? 'Eva' : k.toUpperCase()}
-          <NumField value={boosts[k] ?? 0} min={-6} max={6} onChange={(n) => setStage(k, n)} />
+          <StageSelect value={boosts[k] ?? 0} label={`${label}: ${BOOST_LABELS[k]}`} onChange={(n) => setStage(k, n)} />
         </label>
       ))}
       {value && (
