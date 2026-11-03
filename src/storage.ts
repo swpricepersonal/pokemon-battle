@@ -1,8 +1,8 @@
 import { ABILITIES, blankCustomAbility } from './engine/abilities';
 import { ITEMS } from './engine/items';
-import { PRESET_BUILDS, blankBuild, defaultMoveTarget, newId } from './data/presets';
-import { BOOSTABLE_STATS, CUSTOM_ABILITY, MAJOR_STATUSES, MOVE_SPECIALS, MOVE_TARGETS, NATURE_NAMES, STAT_KEYS, TYPES } from './engine/types';
-import type { Boosts, CustomAbility, Format, Move, PokemonBuild } from './engine/types';
+import { MOVE_LIBRARY, PRESET_BUILDS, blankBuild, defaultMoveTarget, newId } from './data/presets';
+import { BOOSTABLE_STATS, CUSTOM_ABILITY, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS, MOVE_TARGETS, NATURE_NAMES, STAT_KEYS, TERRAINS, TYPES, WEATHERS } from './engine/types';
+import type { Boosts, CustomAbility, Format, MajorStatus, Move, PokemonBuild, Terrain, Weather } from './engine/types';
 
 const LIBRARY_KEY = 'battle-sim:library';
 const SIDES_KEY = 'battle-sim:sides';
@@ -51,26 +51,45 @@ function fillTeam(team: PokemonBuild[], fallback: number): PokemonBuild[] {
   return out;
 }
 
-export function loadTeams(): { teams: Teams; format: Format } | null {
-  const saved = read<{ teams?: unknown[]; format?: unknown }>(TEAMS_KEY);
+export interface FieldChoice {
+  weather: Weather | null;
+  terrain: Terrain | null;
+}
+
+export interface SavedSetup {
+  teams: Teams;
+  format: Format;
+  field: FieldChoice;
+}
+
+export function loadTeams(): SavedSetup | null {
+  const saved = read<{ teams?: unknown[]; format?: unknown; field?: { weather?: unknown; terrain?: unknown } }>(TEAMS_KEY);
   if (saved && Array.isArray(saved.teams) && saved.teams.length === 2) {
     const teams = saved.teams.map((t, i) =>
       fillTeam(Array.isArray(t) ? t.flatMap((b) => normalizeBuild(b) ?? []) : [], i * 2),
     ) as Teams;
-    return { teams, format: saved.format === 'doubles' ? 'doubles' : 'singles' };
+    const f = saved.field ?? {};
+    return {
+      teams,
+      format: saved.format === 'doubles' ? 'doubles' : 'singles',
+      field: {
+        weather: WEATHERS.includes(f.weather as never) ? (f.weather as Weather) : null,
+        terrain: TERRAINS.includes(f.terrain as never) ? (f.terrain as Terrain) : null,
+      },
+    };
   }
   // Older versions saved just the two singles builds.
   const old = read<unknown[]>(SIDES_KEY);
   if (Array.isArray(old) && old.length === 2) {
     const a = normalizeBuild(old[0]);
     const b = normalizeBuild(old[1]);
-    if (a && b) return { teams: [fillTeam([a], 2), fillTeam([b], 4)], format: 'singles' };
+    if (a && b) return { teams: [fillTeam([a], 2), fillTeam([b], 4)], format: 'singles', field: { weather: null, terrain: null } };
   }
   return null;
 }
 
-export function saveTeams(teams: Teams, format: Format) {
-  write(TEAMS_KEY, { teams, format });
+export function saveTeams(teams: Teams, format: Format, field: FieldChoice) {
+  write(TEAMS_KEY, { teams, format, field });
 }
 
 function num(v: unknown, fallback: number, min: number, max: number): number {
@@ -90,6 +109,26 @@ function boosts(v: unknown): Partial<Boosts> {
     if (n) out[k] = n;
   }
   return out;
+}
+
+function normalizeContactStatus(v: unknown): CustomAbility['contactStatus'] {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (!MAJOR_STATUSES.includes(o.status as never)) return null;
+  return { status: o.status as MajorStatus, chance: num(o.chance, 30, 1, 100) };
+}
+
+function normalizeEffects(raw: unknown): Move['effects'] {
+  const effects = (raw && typeof raw === 'object' ? { ...(raw as object) } : {}) as Move['effects'];
+  if (effects.status && !MAJOR_STATUSES.includes(effects.status.status)) delete effects.status;
+  if (effects.multiHit) {
+    const [a, b] = Array.isArray(effects.multiHit) ? effects.multiHit : [];
+    if (typeof a === 'number' && typeof b === 'number' && a >= 1 && b >= a && b <= 10) effects.multiHit = [a, b];
+    else delete effects.multiHit;
+  }
+  const fd = effects.fixedDamage;
+  if (fd !== undefined && fd !== 'level' && fd !== 'halfHp' && !(typeof fd === 'number' && fd > 0)) delete effects.fixedDamage;
+  return effects;
 }
 
 function normalizeCustomAbility(raw: unknown): CustomAbility {
@@ -115,19 +154,28 @@ function normalizeCustomAbility(raw: unknown): CustomAbility {
     statusImmune: Array.isArray(c.statusImmune) ? c.statusImmune.filter((x) => MAJOR_STATUSES.includes(x)) : [],
     onStartFoeBoosts: boosts(c.onStartFoeBoosts),
     endOfTurnBoosts: boosts(c.endOfTurnBoosts),
+    onStartWeather: WEATHERS.includes(c.onStartWeather as never) ? (c.onStartWeather as CustomAbility['onStartWeather']) : null,
+    onStartTerrain: TERRAINS.includes(c.onStartTerrain as never) ? (c.onStartTerrain as CustomAbility['onStartTerrain']) : null,
+    contactStatus: normalizeContactStatus(c.contactStatus),
+    contactDamage: typeof c.contactDamage === 'number' && Number.isFinite(c.contactDamage) ? Math.max(0, Math.min(100, c.contactDamage)) : 0,
   };
 }
 
 function normalizeMove(raw: unknown): Move | null {
   if (!raw || typeof raw !== 'object') return null;
   const m = raw as Record<string, unknown>;
-  const effects = (m.effects && typeof m.effects === 'object' ? m.effects : {}) as Move['effects'];
-  if (effects.status && !MAJOR_STATUSES.includes(effects.status.status)) delete effects.status;
+  const effects = normalizeEffects(m.effects);
   const category = oneOf(m.category, ['Physical', 'Special', 'Status'] as const, 'Physical');
-  const special = MOVE_SPECIALS.includes(m.special as never) ? (m.special as Move['special']) : undefined;
+  // Moves saved by older versions lack targets and flags: borrow them from the library move of the same name.
+  const known = MOVE_LIBRARY.find((x) => x.name === m.name);
+  const special = MOVE_SPECIALS.includes(m.special as never) ? (m.special as Move['special']) : m.special === undefined ? known?.special : undefined;
+  const flags = Array.isArray(m.flags)
+    ? m.flags.filter((f) => MOVE_FLAGS.includes(f))
+    : known?.flags ?? (category === 'Physical' ? ['contact' as const] : []);
   return {
-    target: oneOf(m.target, MOVE_TARGETS, defaultMoveTarget(category, effects)),
+    target: oneOf(m.target, MOVE_TARGETS, known?.target ?? defaultMoveTarget(category, effects)),
     ...(special ? { special } : {}),
+    ...(flags.length ? { flags } : {}),
     name: typeof m.name === 'string' ? m.name : 'Move',
     type: oneOf(m.type, TYPES, 'Normal'),
     category,

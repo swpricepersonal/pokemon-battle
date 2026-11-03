@@ -1,7 +1,7 @@
 import { ABILITIES, ABILITY_NAMES, blankCustomAbility } from '../engine/abilities';
 import { ITEMS, ITEM_GROUPS } from '../engine/items';
-import { BOOSTABLE_STATS, BOOST_LABELS, CUSTOM_ABILITY, MAJOR_STATUSES, STATUS_LABELS, TYPES } from '../engine/types';
-import type { BoostableStat, Boosts, CustomAbility, MajorStatus, PokemonBuild, TypeName } from '../engine/types';
+import { BOOSTABLE_STATS, BOOST_LABELS, CUSTOM_ABILITY, MAJOR_STATUSES, STATUS_LABELS, TERRAINS, TERRAIN_LABELS, TYPES, WEATHERS, WEATHER_LABELS } from '../engine/types';
+import type { BoostableStat, Boosts, CustomAbility, MajorStatus, PokemonBuild, Terrain, TypeName, Weather } from '../engine/types';
 import { NumField } from './common';
 
 const ITEM_NAMES = Object.keys(ITEMS);
@@ -71,13 +71,13 @@ function TypeSelect({ value, onChange, label }: { value: TypeName | null; onChan
 }
 
 /** Decimal input for multipliers like 1.5 (stored as numbers, edited as text). */
-function MultField({ value, onChange, label }: { value: number; onChange: (n: number) => void; label: string }) {
+function MultField({ value, onChange, label, max = 10 }: { value: number; onChange: (n: number) => void; label: string; max?: number }) {
   return (
     <input
-      className="num mult" type="number" step="0.05" min={0} max={10} value={value} aria-label={label}
+      className="num mult" type="number" step="0.05" min={0} max={max} value={value} aria-label={label}
       onChange={(e) => {
         const n = parseFloat(e.target.value);
-        if (Number.isFinite(n)) onChange(Math.max(0, Math.min(10, n)));
+        if (Number.isFinite(n)) onChange(Math.max(0, Math.min(max, n)));
       }}
     />
   );
@@ -170,6 +170,34 @@ function CustomAbilityEditor({ value: c, onChange }: { value: CustomAbility; onC
             {STATUS_LABELS[st]}
           </label>
         ))}
+      </div>
+
+      <div className="effect-row">
+        <span className="effect-label">At start</span>
+        <select value={c.onStartWeather ?? ''} onChange={(e) => set('onStartWeather', (e.target.value || null) as Weather | null)} aria-label="Weather it sets">
+          <option value="">No weather</option>
+          {WEATHERS.map((w) => <option key={w} value={w}>Sets {WEATHER_LABELS[w].toLowerCase()}</option>)}
+        </select>
+        <select value={c.onStartTerrain ?? ''} onChange={(e) => set('onStartTerrain', (e.target.value || null) as Terrain | null)} aria-label="Terrain it sets">
+          <option value="">No terrain</option>
+          {TERRAINS.map((t) => <option key={t} value={t}>Sets {TERRAIN_LABELS[t]}</option>)}
+        </select>
+      </div>
+
+      <div className="effect-row">
+        <span className="effect-label">On contact</span>
+        <select
+          value={c.contactStatus?.status ?? ''}
+          onChange={(e) => set('contactStatus', e.target.value ? { status: e.target.value as MajorStatus, chance: c.contactStatus?.chance ?? 30 } : null)}
+          aria-label="Status inflicted on contact"
+        >
+          <option value="">No status</option>
+          {MAJOR_STATUSES.map((st) => <option key={st} value={st}>{STATUS_LABELS[st]}</option>)}
+        </select>
+        {c.contactStatus && (
+          <label className="inline"><NumField value={c.contactStatus.chance} min={1} max={100} onChange={(n) => set('contactStatus', { ...c.contactStatus!, chance: n })} />% chance</label>
+        )}
+        <label className="inline">Attacker loses <MultField label="Contact damage percent" max={100} value={c.contactDamage} onChange={(n) => set('contactDamage', n)} />% HP</label>
       </div>
 
       <BoostRow label="Foes at start" value={c.onStartFoeBoosts} onChange={(b) => set('onStartFoeBoosts', b)} />

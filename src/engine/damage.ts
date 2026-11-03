@@ -1,10 +1,10 @@
-import { abilityName, defenderAbility, getAbility } from './abilities';
+import { abilityName, defenderAbility, getAbility, isGrounded } from './abilities';
 import type { DamageCtx } from './abilities';
 import { getItem } from './items';
 import { applyMod, chainMods, fmtMod, modify } from './modifiers';
 import { stageMultiplier } from './stats';
 import { typeMultiplier } from './typeChart';
-import type { BattlePokemon, Move, TypeName } from './types';
+import type { BattlePokemon, Move, Terrain, TypeName, Weather } from './types';
 
 export const CRIT_MULTIPLIER = 1.5;
 /** Crit chance by crit stage (Gen 7+): 1/24, 1/8, 1/2, guaranteed. */
@@ -55,7 +55,13 @@ export interface DamageOptions {
   doubles?: boolean;
   attackerAlly?: BattlePokemon | null;
   defenderAlly?: BattlePokemon | null;
+  /** Active weather (null when none or suppressed by Cloud Nine). */
+  weather?: Weather | null;
+  terrain?: Terrain | null;
 }
+
+const TERRAIN_TYPE: Record<Terrain, TypeName> = { electric: 'Electric', grassy: 'Grass', psychic: 'Psychic', misty: 'Fairy' };
+const GRASSY_HALVED = new Set(['Earthquake', 'Bulldoze', 'Magnitude']);
 
 /** Round to nearest integer, with .5 rounding down (Game Freak's rounding). */
 export function pokeRound(n: number): number {
@@ -104,7 +110,12 @@ export function calcDamage(
   const aItem = getItem(attacker);
   const dItem = getItem(defender);
   const eff = typeEffectiveness(attacker, defender, move, opts.typeless);
-  const ctx: DamageCtx = { attacker, defender, move, eff, crit: opts.crit };
+  const weather = opts.weather ?? null;
+  const terrain = opts.terrain ?? null;
+  const ctx: DamageCtx = { attacker, defender, move, eff, crit: opts.crit, weather, terrain };
+  const attackerGrounded = isGrounded(attacker);
+  const defenderGrounded = isGrounded(defender);
+  const terrainLabel = terrain ? `${terrain[0].toUpperCase()}${terrain.slice(1)} Terrain` : '';
   const aName = abilityName(attacker);
   const dName = abilityName(defender);
   const ally = opts.attackerAlly && opts.attackerAlly.currentHp > 0 ? opts.attackerAlly : null;
@@ -116,7 +127,11 @@ export function calcDamage(
     aAb?.basePower && [aName, aAb.basePower(ctx)],
     ally && allyAb?.allyBasePower && [`${ally.name}'s ${abilityName(ally)}`, allyAb.allyBasePower(ctx)],
     opts.helpingHand ? ['Helping Hand', 1.5] : null,
+    dAb?.defenderBasePower && [`${defender.name}'s ${dName}`, dAb.defenderBasePower(ctx)],
     aItem?.basePower && [attacker.item, aItem.basePower(ctx)],
+    terrain && terrain !== 'misty' && attackerGrounded && move.type === TERRAIN_TYPE[terrain] ? [terrainLabel, 1.3] : null,
+    terrain === 'grassy' && defenderGrounded && GRASSY_HALVED.has(move.name) ? [terrainLabel, 0.5] : null,
+    terrain === 'misty' && defenderGrounded && move.type === 'Dragon' ? [terrainLabel, 0.5] : null,
   ]);
   const power = Math.max(1, applyMod(move.power, chainMods(powerMods.map((m) => m[1]))));
 
@@ -134,9 +149,12 @@ export function calcDamage(
     dAb?.defenderAttackMod && [`${defender.name}'s ${dName}`, dAb.defenderAttackMod(ctx)],
     aItem?.attack && [attacker.item, aItem.attack(ctx)],
   ]);
+  const defTypes = typesOf(defender);
   const defenseMods = collect([
     dAb?.defense && [dName, dAb.defense(ctx)],
     dItem?.defense && [defender.item, dItem.defense(ctx)],
+    weather === 'sand' && !physical && defTypes.includes('Rock') ? ['Sandstorm', 1.5] : null,
+    weather === 'snow' && physical && defTypes.includes('Ice') ? ['Snow', 1.5] : null,
   ]);
   const attack = Math.max(1, applyMod(Math.floor(attacker.stats[atkKey] * stageMultiplier(atkStage)), chainMods(attackMods.map((m) => m[1]))));
   const defense = Math.max(1, applyMod(Math.floor(defender.stats[defKey] * stageMultiplier(defStage)), chainMods(defenseMods.map((m) => m[1]))));
@@ -153,6 +171,14 @@ export function calcDamage(
   if (opts.spread) {
     d = modify(d, 0.75);
     steps.push({ label: 'Spread move', multiplier: '×0.75', result: d });
+  }
+  const weatherMod =
+    weather === 'sun' ? (move.type === 'Fire' ? 1.5 : move.type === 'Water' ? 0.5 : 1)
+    : weather === 'rain' ? (move.type === 'Water' ? 1.5 : move.type === 'Fire' ? 0.5 : 1)
+    : 1;
+  if (weatherMod !== 1 && !opts.typeless) {
+    d = modify(d, weatherMod);
+    steps.push({ label: weather === 'sun' ? 'Harsh sunlight' : 'Rain', multiplier: `×${weatherMod}`, result: d });
   }
   if (opts.crit) {
     d = Math.floor(d * CRIT_MULTIPLIER);

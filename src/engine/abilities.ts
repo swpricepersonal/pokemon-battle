@@ -1,5 +1,5 @@
 import { CUSTOM_ABILITY } from './types';
-import type { BattlePokemon, Boosts, CustomAbility, MajorStatus, Move, TypeName } from './types';
+import type { BattlePokemon, Boosts, CustomAbility, MajorStatus, Move, Terrain, TypeName, Weather } from './types';
 
 /** Context passed to damage-related ability hooks. */
 export interface DamageCtx {
@@ -9,6 +9,9 @@ export interface DamageCtx {
   /** Type effectiveness of the move against the defender. */
   eff: number;
   crit: boolean;
+  /** Active weather (already accounting for Cloud Nine / Air Lock). */
+  weather?: Weather | null;
+  terrain?: Terrain | null;
 }
 
 export interface ImmunityResult {
@@ -67,10 +70,32 @@ export interface AbilityDef {
   contrary?: boolean;
   onStatDroppedByFoe?: Partial<Boosts>;
 
-  // Other
-  speed?(mon: BattlePokemon): number;
+  /** Base power multiplier applied by the target's ability (Dry Skin vs Fire). */
+  defenderBasePower?(c: DamageCtx): number;
+  /** Multiplier on moves' accuracy against this Pokémon (Sand Veil). */
+  accuracyAgainst?(weather: Weather | null): number;
+  /** Effects on a Pokémon that makes contact with this one. */
+  onContact?: { status?: { status: MajorStatus; chance: number }; damage?: number };
+  leafGuard?: boolean;
+  ownTempo?: boolean;
+  skillLink?: boolean;
+  /** Not grounded (Levitate): ignores terrain and Ground moves. */
+  airborne?: boolean;
+
+  // Field
+  speed?(mon: BattlePokemon, weather: Weather | null, terrain: Terrain | null): number;
   onStartFoeBoosts?: Partial<Boosts>;
   endOfTurnBoosts?: Partial<Boosts>;
+  onStartWeather?: Weather;
+  onStartTerrain?: Terrain;
+  /** Suppresses weather effects while on the field (Cloud Nine). */
+  negatesWeather?: boolean;
+  /** Takes no damage from sandstorm. */
+  sandImmune?: boolean;
+  /** End-of-turn HP change as a fraction of max HP (negative = damage). */
+  endOfTurnHp?(weather: Weather | null): number;
+  /** Cures its status at the end of the turn in this weather (Hydration). */
+  cureIn?: Weather;
 }
 
 const physical = (m: Move) => m.category === 'Physical';
@@ -101,7 +126,7 @@ function statusImmunity(statuses: MajorStatus[], what: string): AbilityDef {
 export function hasSecondary(move: Move): boolean {
   if (move.category === 'Status') return false;
   const e = move.effects;
-  return !!(e.status || e.targetBoosts || e.flinch);
+  return !!(e.status || e.targetBoosts || e.flinch || e.confuse);
 }
 
 export const ABILITIES: Record<string, AbilityDef> = {
@@ -143,7 +168,7 @@ export const ABILITIES: Record<string, AbilityDef> = {
   Insomnia: statusImmunity(['slp'], 'put to sleep'),
   Intimidate: { desc: 'Lowers foes’ Attack by 1 when the battle starts.', onStartFoeBoosts: { atk: -1 } },
   Levitate: {
-    desc: 'Immune to Ground moves.', breakable: true,
+    desc: 'Immune to Ground moves and unaffected by terrain.', breakable: true, airborne: true,
     immune: (c) => (c.move.type === 'Ground' && c.move.category !== 'Status' ? {} : null),
   },
   'Lightning Rod': absorb('Electric', { boost: { spa: 1 } }, '; raises Sp. Atk when hit by one', true),
@@ -213,6 +238,72 @@ export const ABILITIES: Record<string, AbilityDef> = {
     desc: 'Only super-effective attacks can hit it.', breakable: true,
     immune: (c) => (c.move.category !== 'Status' && c.eff <= 1 ? {} : null),
   },
+
+  // Weather
+  Drought: { desc: 'Summons harsh sunlight for 5 turns when the battle starts.', onStartWeather: 'sun' },
+  Drizzle: { desc: 'Summons rain for 5 turns when the battle starts.', onStartWeather: 'rain' },
+  'Sand Stream': { desc: 'Summons a sandstorm for 5 turns when the battle starts.', onStartWeather: 'sand', sandImmune: true },
+  'Snow Warning': { desc: 'Summons snow for 5 turns when the battle starts.', onStartWeather: 'snow' },
+  'Cloud Nine': { desc: 'Weather has no effect while it’s on the field.', negatesWeather: true },
+  'Air Lock': { desc: 'Weather has no effect while it’s on the field.', negatesWeather: true },
+  Chlorophyll: { desc: 'Speed ×2 in harsh sunlight.', speed: (_m, w) => (w === 'sun' ? 2 : 1) },
+  'Swift Swim': { desc: 'Speed ×2 in rain.', speed: (_m, w) => (w === 'rain' ? 2 : 1) },
+  'Sand Rush': { desc: 'Speed ×2 in a sandstorm; no sandstorm damage.', sandImmune: true, speed: (_m, w) => (w === 'sand' ? 2 : 1) },
+  'Slush Rush': { desc: 'Speed ×2 in snow.', speed: (_m, w) => (w === 'snow' ? 2 : 1) },
+  'Solar Power': {
+    desc: 'Sp. Atk ×1.5 in harsh sunlight, but loses 1/8 max HP each turn in it.',
+    attack: (c) => (c.weather === 'sun' && special(c.move) ? 1.5 : 1),
+    endOfTurnHp: (w) => (w === 'sun' ? -1 / 8 : 0),
+  },
+  'Sand Force': {
+    desc: 'Rock, Ground and Steel moves ×1.3 power in a sandstorm; no sandstorm damage.', sandImmune: true,
+    basePower: (c) => (c.weather === 'sand' && ['Rock', 'Ground', 'Steel'].includes(c.move.type) ? 1.3 : 1),
+  },
+  'Sand Veil': { desc: 'Moves against it have ×0.8 accuracy in a sandstorm; no sandstorm damage.', breakable: true, sandImmune: true, accuracyAgainst: (w) => (w === 'sand' ? 0.8 : 1) },
+  'Snow Cloak': { desc: 'Moves against it have ×0.8 accuracy in snow.', breakable: true, accuracyAgainst: (w) => (w === 'snow' ? 0.8 : 1) },
+  'Rain Dish': { desc: 'Heals 1/16 max HP each turn in rain.', endOfTurnHp: (w) => (w === 'rain' ? 1 / 16 : 0) },
+  'Ice Body': { desc: 'Heals 1/16 max HP each turn in snow.', endOfTurnHp: (w) => (w === 'snow' ? 1 / 16 : 0) },
+  'Dry Skin': {
+    desc: 'Immune to Water moves (heals 25%); heals 1/8 in rain, loses 1/8 in sun; Fire moves ×1.25 power against it.', breakable: true,
+    immune: (c) => (c.move.type === 'Water' ? { heal: 0.25 } : null),
+    defenderBasePower: (c) => (c.move.type === 'Fire' ? 1.25 : 1),
+    endOfTurnHp: (w) => (w === 'rain' ? 1 / 8 : w === 'sun' ? -1 / 8 : 0),
+  },
+  Hydration: { desc: 'Cures its status condition at the end of each turn in rain.', cureIn: 'rain' },
+  'Leaf Guard': { desc: 'Can’t get a status condition in harsh sunlight.', breakable: true, leafGuard: true },
+  Overcoat: {
+    desc: 'No weather damage; immune to powder moves (Spore, Rage Powder).', breakable: true, sandImmune: true,
+    immune: (c) => (c.move.flags?.includes('powder') ? {} : null),
+  },
+
+  // Terrain
+  'Electric Surge': { desc: 'Sets Electric Terrain for 5 turns when the battle starts.', onStartTerrain: 'electric' },
+  'Grassy Surge': { desc: 'Sets Grassy Terrain for 5 turns when the battle starts.', onStartTerrain: 'grassy' },
+  'Psychic Surge': { desc: 'Sets Psychic Terrain for 5 turns when the battle starts.', onStartTerrain: 'psychic' },
+  'Misty Surge': { desc: 'Sets Misty Terrain for 5 turns when the battle starts.', onStartTerrain: 'misty' },
+  'Surge Surfer': { desc: 'Speed ×2 on Electric Terrain.', speed: (_m, _w, t) => (t === 'electric' ? 2 : 1) },
+  'Grass Pelt': { desc: 'Defense ×1.5 on Grassy Terrain.', breakable: true, defense: (c) => (c.terrain === 'grassy' && physical(c.move) ? 1.5 : 1) },
+
+  // Contact and move flags
+  Static: { desc: '30% chance to paralyze a Pokémon that makes contact with it.', onContact: { status: { status: 'par', chance: 30 } } },
+  'Flame Body': { desc: '30% chance to burn a Pokémon that makes contact with it.', onContact: { status: { status: 'brn', chance: 30 } } },
+  'Poison Point': { desc: '30% chance to poison a Pokémon that makes contact with it.', onContact: { status: { status: 'psn', chance: 30 } } },
+  'Rough Skin': { desc: 'A Pokémon that makes contact with it loses 1/8 of its max HP.', onContact: { damage: 1 / 8 } },
+  'Iron Barbs': { desc: 'A Pokémon that makes contact with it loses 1/8 of its max HP.', onContact: { damage: 1 / 8 } },
+  'Tough Claws': { desc: 'Contact moves ×1.3 power.', basePower: (c) => (c.move.flags?.includes('contact') ? 1.3 : 1) },
+  'Iron Fist': { desc: 'Punching moves ×1.2 power.', basePower: (c) => (c.move.flags?.includes('punch') ? 1.2 : 1) },
+  'Strong Jaw': { desc: 'Biting moves ×1.5 power.', basePower: (c) => (c.move.flags?.includes('bite') ? 1.5 : 1) },
+  'Mega Launcher': { desc: 'Pulse moves ×1.5 power.', basePower: (c) => (c.move.flags?.includes('pulse') ? 1.5 : 1) },
+  Fluffy: {
+    desc: 'Contact moves deal half damage to it, but Fire moves deal double.', breakable: true,
+    defenderFinal: (c) => (c.move.flags?.includes('contact') ? 0.5 : 1) * (c.move.type === 'Fire' ? 2 : 1),
+  },
+  Soundproof: {
+    desc: 'Immune to sound-based moves.', breakable: true,
+    immune: (c) => (c.move.flags?.includes('sound') ? {} : null),
+  },
+  'Skill Link': { desc: 'Multi-hit moves always hit the maximum number of times.', skillLink: true },
+  'Own Tempo': { desc: 'Can’t be confused; immune to Intimidate.', breakable: true, ownTempo: true },
 };
 
 export const ABILITY_NAMES = Object.keys(ABILITIES).sort();
@@ -230,6 +321,10 @@ export function blankCustomAbility(): CustomAbility {
     statusImmune: [],
     onStartFoeBoosts: {},
     endOfTurnBoosts: {},
+    onStartWeather: null,
+    onStartTerrain: null,
+    contactStatus: null,
+    contactDamage: 0,
   };
 }
 
@@ -265,6 +360,14 @@ export function compileCustomAbility(c: CustomAbility): AbilityDef {
   if (c.statusImmune.length) def.statusImmune = c.statusImmune;
   if (hasBoosts(c.onStartFoeBoosts)) def.onStartFoeBoosts = c.onStartFoeBoosts;
   if (hasBoosts(c.endOfTurnBoosts)) def.endOfTurnBoosts = c.endOfTurnBoosts;
+  if (c.onStartWeather) def.onStartWeather = c.onStartWeather;
+  if (c.onStartTerrain) def.onStartTerrain = c.onStartTerrain;
+  if (c.contactStatus || c.contactDamage) {
+    def.onContact = {
+      ...(c.contactStatus ? { status: c.contactStatus } : {}),
+      ...(c.contactDamage ? { damage: c.contactDamage / 100 } : {}),
+    };
+  }
   return def;
 }
 
@@ -295,4 +398,10 @@ export function defenderAbility(defender: BattlePokemon, attacker: BattlePokemon
   if (!def) return null;
   if (attacker && attacker !== defender && def.breakable && getAbility(attacker)?.moldBreaker) return null;
   return def;
+}
+
+/** Grounded Pokémon are affected by terrain (not Flying types or Levitate). */
+export function isGrounded(mon: BattlePokemon): boolean {
+  if (mon.build.type1 === 'Flying' || mon.build.type2 === 'Flying') return false;
+  return !getAbility(mon)?.airborne;
 }

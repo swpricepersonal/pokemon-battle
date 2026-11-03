@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { abilityName } from '../engine/abilities';
 import {
-  STRUGGLE_INDEX, allMons, allyOf, availableChoices, defaultTarget, effectiveSpeed, foesOf, getChoiceMove, isAlive,
-  monAt, moveNeedsTarget, validTargets,
+  STRUGGLE_INDEX, activeWeather, allMons, allyOf, availableChoices, defaultTarget, effectiveMove, effectiveSpeed,
+  fieldDamageOpts, foesOf, getChoiceMove, isAlive, monAt, moveNeedsTarget, validTargets,
 } from '../engine/battle';
 import type { Action, BattleState, LogEntry, MoveChoice, Side, TargetRef, TurnChoices } from '../engine/battle';
 import { damageRange, typeEffectiveness, typesOf } from '../engine/damage';
-import { BOOSTABLE_STATS, STATUS_LABELS } from '../engine/types';
+import { BOOSTABLE_STATS, STATUS_LABELS, TERRAIN_LABELS, WEATHER_LABELS } from '../engine/types';
 import type { BattlePokemon, Move } from '../engine/types';
 import { StatusBadge, TYPE_COLORS, TypeBadge } from './common';
 
@@ -98,6 +98,12 @@ export function BattleView({
 
 function FieldConditions({ battle }: { battle: BattleState }) {
   const chips: string[] = [];
+  const turns = (n: number) => (n < 0 ? 'whole battle' : `${n} turn${n === 1 ? '' : 's'} left`);
+  if (battle.weather) {
+    const suppressed = !activeWeather(battle);
+    chips.push(`${WEATHER_LABELS[battle.weather]} · ${turns(battle.weatherTurns)}${suppressed ? ' (no effect: Cloud Nine)' : ''}`);
+  }
+  if (battle.terrain) chips.push(`${TERRAIN_LABELS[battle.terrain]} · ${turns(battle.terrainTurns)}`);
   if (battle.trickRoom) chips.push(`Trick Room · ${battle.trickRoom} turn${battle.trickRoom === 1 ? '' : 's'} left`);
   battle.sides.forEach((side, i) => {
     const who = `P${i + 1}`;
@@ -152,7 +158,7 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
         Atk {mon.stats.atk} · Def {mon.stats.def} · SpA {mon.stats.spa} · SpD {mon.stats.spd} · Spe {mon.stats.spe}
         {speed !== mon.stats.spe && <> (effective {speed})</>}
       </div>
-      {(boosts.length > 0 || mon.status || lockedMove) && (
+      {(boosts.length > 0 || mon.status || lockedMove || mon.confusion > 0) && (
         <div className="chips">
           {mon.status && (
             <span className="chip">
@@ -161,6 +167,7 @@ function MonCard({ battle, mon }: { battle: BattleState; mon: BattlePokemon }) {
               {mon.status === 'tox' && ` (next: ${Math.min(15, mon.toxicCounter + 1)}/16 HP)`}
             </span>
           )}
+          {mon.confusion > 0 && <span className="chip">Confused</span>}
           {lockedMove && <span className="chip">Locked into {lockedMove}</span>}
           {boosts.map((k) => (
             <span key={k} className={`chip ${mon.boosts[k] > 0 ? 'up' : 'down'}`}>
@@ -178,8 +185,14 @@ function pctOf(dmg: number, foe: BattlePokemon) {
 }
 
 /** Short damage preview text for a move against the relevant foe(s). */
-function preview(battle: BattleState, mon: BattlePokemon, move: Move, typeless: boolean, target?: TargetRef): string {
+function preview(battle: BattleState, mon: BattlePokemon, baseMove: Move, typeless: boolean, target?: TargetRef): string {
+  const move = effectiveMove(battle, baseMove);
   if (move.category === 'Status' || move.power <= 0) return 'Status move';
+  const fixed = move.effects.fixedDamage;
+  const hits = move.special === 'beatUp'
+    ? battle.sides[mon.side].mons.filter((m) => m === mon || (isAlive(m) && !m.status)).length
+    : null;
+  const [minHits, maxHits] = hits ? [hits, hits] : move.effects.multiHit ?? [1, 1];
   const foes = foesOf(battle, mon);
   const spreadTargets = move.target === 'adjacentFoes' || move.target === 'allAdjacent';
   let shown: BattlePokemon[] = foes;
@@ -192,15 +205,23 @@ function preview(battle: BattleState, mon: BattlePokemon, move: Move, typeless: 
   const parts = shown.map((foe) => {
     const eff = typeEffectiveness(mon, foe, move, typeless);
     const side = battle.sides[foe.side];
-    const range = damageRange(mon, foe, move, {
-      typeless, spread: spreadCount > 1, doubles: battle.format === 'doubles',
+    const prefix = shown.length > 1 || battle.format === 'doubles' ? `${foe.name}: ` : '';
+    if (eff === 0) return `${prefix}no effect`;
+    if (fixed !== undefined) {
+      const amount = fixed === 'level' ? mon.build.level : fixed === 'halfHp' ? Math.max(1, Math.floor(foe.currentHp / 2)) : fixed;
+      return `${prefix}${amount} HP (${pctOf(amount, foe)}%)`;
+    }
+    const perHit = hits ? { ...move, power: 5 + Math.floor(mon.build.baseStats.atk / 10) } : move;
+    const range = damageRange(mon, foe, perHit, {
+      ...fieldDamageOpts(battle),
+      typeless, spread: spreadCount > 1,
       screen: move.category === 'Physical' ? side.reflect > 0 : side.lightScreen > 0,
       attackerAlly: ally, defenderAlly: allyOf(battle, foe),
     });
-    const prefix = shown.length > 1 || battle.format === 'doubles' ? `${foe.name}: ` : '';
-    if (!range || eff === 0) return `${prefix}no effect`;
+    if (!range) return `${prefix}no effect`;
     const tag = eff > 1 ? ' (SE)' : eff < 1 ? ' (resisted)' : '';
-    return `${prefix}${pctOf(range.min, foe)}–${pctOf(range.max, foe)}%${tag}`;
+    const hitsTag = maxHits > 1 ? ` in ${minHits === maxHits ? minHits : `${minHits}–${maxHits}`} hits` : '';
+    return `${prefix}${pctOf(range.min * minHits, foe)}–${pctOf(range.max * maxHits, foe)}%${tag}${hitsTag}`;
   });
   return parts.join(' · ');
 }
@@ -220,8 +241,9 @@ function MovePicker({
     <div className="move-picker-wrap">
       <div className="move-picker">
         {slots.map((i) => {
-          const move = i === STRUGGLE_INDEX ? getChoiceMove(mon, i) : mon.build.moves[i];
-          if (!move) return <div key={i} className="move-btn empty">—</div>;
+          const base = i === STRUGGLE_INDEX ? getChoiceMove(mon, i) : mon.build.moves[i];
+          if (!base) return <div key={i} className="move-btn empty">—</div>;
+          const move = effectiveMove(battle, base);
           const disabled = !allowed.includes(i);
           const selected = action?.move === i;
           return (
@@ -237,10 +259,10 @@ function MovePicker({
               <span className="move-meta">
                 <TypeBadge type={move.type} small />
                 <span>{move.category}</span>
-                {i !== STRUGGLE_INDEX && <span>PP {mon.pp[i]}/{move.pp}</span>}
+                {i !== STRUGGLE_INDEX && <span>PP {mon.pp[i]}/{base.pp}</span>}
                 {move.priority !== 0 && <span>{move.priority > 0 ? '+' : ''}{move.priority} priority</span>}
               </span>
-              <span className="move-preview muted">{preview(battle, mon, move, i === STRUGGLE_INDEX, selected ? action?.target : undefined)}</span>
+              <span className="move-preview muted">{preview(battle, mon, base, i === STRUGGLE_INDEX, selected ? action?.target : undefined)}</span>
             </button>
           );
         })}

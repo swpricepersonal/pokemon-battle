@@ -1,8 +1,28 @@
-import type { Move, MoveCategory, MoveEffects, MoveSpecial, MoveTarget, PokemonBuild, StatTable, TypeName } from '../engine/types';
+import type { Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, PokemonBuild, StatTable, TypeName } from '../engine/types';
 
 /** Default target: status moves that only affect the user target 'self', everything else one Pokémon. */
 export function defaultMoveTarget(category: MoveCategory, effects: MoveEffects): MoveTarget {
-  return category === 'Status' && !effects.status && !effects.targetBoosts ? 'self' : 'normal';
+  return category === 'Status' && !effects.status && !effects.targetBoosts && !effects.confuse ? 'self' : 'normal';
+}
+
+/** Move flags by name, so library entries stay one line each. */
+const FLAG_LISTS: Record<MoveFlag, string[]> = {
+  contact: [
+    'Tackle', 'Quick Attack', 'Extreme Speed', 'Body Slam', 'Double-Edge', 'Slash', 'Fake Out', 'Headbutt', 'Double Hit',
+    'Super Fang', 'Flare Blitz', 'Fire Punch', 'Aqua Jet', 'Waterfall', 'Wild Charge', 'Thunder Punch', 'Leaf Blade',
+    'Ice Punch', 'Close Combat', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Seismic Toss', 'Poison Jab', 'High Horsepower',
+    'Brave Bird', 'Dual Wingbeat', 'Zen Headbutt', 'X-Scissor', 'Shadow Sneak', 'Dragon Claw', 'Crunch', 'Iron Head',
+    'Bullet Punch', 'Play Rough',
+  ],
+  punch: ['Fire Punch', 'Thunder Punch', 'Ice Punch', 'Drain Punch', 'Mach Punch', 'Dynamic Punch', 'Bullet Punch'],
+  bite: ['Crunch'],
+  pulse: ['Water Pulse', 'Aura Sphere', 'Dragon Pulse', 'Dark Pulse', 'Heal Pulse'],
+  sound: ['Hyper Voice', 'Bug Buzz', 'Snarl', 'Growl', 'Screech'],
+  powder: ['Spore', 'Rage Powder'],
+};
+
+function flagsFor(name: string): MoveFlag[] {
+  return (Object.keys(FLAG_LISTS) as MoveFlag[]).filter((f) => FLAG_LISTS[f].includes(name));
 }
 
 function mv(
@@ -17,6 +37,8 @@ function mv(
     effects,
   };
   if (extra.special) move.special = extra.special;
+  const flags = flagsFor(name);
+  if (flags.length) move.flags = flags;
   return move;
 }
 
@@ -34,11 +56,17 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Hyper Voice', 'Normal', 'Special', 90, 100, 10, FOES),
   mv('Fake Out', 'Normal', 'Physical', 40, 100, 10, { priority: 3, special: 'fakeOut', effects: { flinch: 100 } }),
   mv('Headbutt', 'Normal', 'Physical', 70, 100, 15, { effects: { flinch: 30 } }),
+  mv('Double Hit', 'Normal', 'Physical', 35, 90, 10, { effects: { multiHit: [2, 2] } }),
+  mv('Super Fang', 'Normal', 'Physical', 1, 90, 10, { effects: { fixedDamage: 'halfHp' } }),
+  mv('Weather Ball', 'Normal', 'Special', 50, 100, 10, { special: 'weatherBall' }),
+  mv('Swagger', 'Normal', 'Status', 0, 85, 15, { effects: { targetBoosts: { boosts: { atk: 2 }, chance: 100 }, confuse: 100 } }),
   // Fire
   mv('Flamethrower', 'Fire', 'Special', 90, 100, 15, { effects: { status: { status: 'brn', chance: 10 } } }),
   mv('Fire Blast', 'Fire', 'Special', 110, 85, 5, { effects: { status: { status: 'brn', chance: 10 } } }),
   mv('Heat Wave', 'Fire', 'Special', 95, 90, 10, { ...FOES, effects: { status: { status: 'brn', chance: 10 } } }),
   mv('Flare Blitz', 'Fire', 'Physical', 120, 100, 15, { effects: { recoil: 33, status: { status: 'brn', chance: 10 } } }),
+  mv('Fire Punch', 'Fire', 'Physical', 75, 100, 15, { effects: { status: { status: 'brn', chance: 10 } } }),
+  mv('Sunny Day', 'Fire', 'Status', 0, null, 5, { target: 'field', special: 'sunnyDay' }),
   mv('Will-O-Wisp', 'Fire', 'Status', 0, 85, 15, { effects: { status: { status: 'brn', chance: 100 } } }),
   // Water
   mv('Surf', 'Water', 'Special', 90, 100, 15, ALL),
@@ -46,10 +74,15 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Hydro Pump', 'Water', 'Special', 110, 80, 5),
   mv('Scald', 'Water', 'Special', 80, 100, 15, { effects: { status: { status: 'brn', chance: 30 } } }),
   mv('Aqua Jet', 'Water', 'Physical', 40, 100, 20, { priority: 1 }),
-  mv('Waterfall', 'Water', 'Physical', 80, 100, 15),
+  mv('Waterfall', 'Water', 'Physical', 80, 100, 15, { effects: { flinch: 20 } }),
+  mv('Water Pulse', 'Water', 'Special', 60, 100, 20, { effects: { confuse: 20 } }),
+  mv('Water Shuriken', 'Water', 'Special', 15, 100, 20, { priority: 1, effects: { multiHit: [2, 5] } }),
+  mv('Rain Dance', 'Water', 'Status', 0, null, 5, { target: 'field', special: 'rainDance' }),
   // Electric
   mv('Thunderbolt', 'Electric', 'Special', 90, 100, 15, { effects: { status: { status: 'par', chance: 10 } } }),
-  mv('Thunder', 'Electric', 'Special', 110, 70, 10, { effects: { status: { status: 'par', chance: 30 } } }),
+  mv('Thunder', 'Electric', 'Special', 110, 70, 10, { special: 'stormAccuracy', effects: { status: { status: 'par', chance: 30 } } }),
+  mv('Thunder Punch', 'Electric', 'Physical', 75, 100, 15, { effects: { status: { status: 'par', chance: 10 } } }),
+  mv('Electric Terrain', 'Electric', 'Status', 0, null, 10, { target: 'field', special: 'electricTerrain' }),
   mv('Thunder Wave', 'Electric', 'Status', 0, 90, 20, { effects: { status: { status: 'par', chance: 100 } } }),
   mv('Wild Charge', 'Electric', 'Physical', 90, 100, 15, { effects: { recoil: 25 } }),
   mv('Discharge', 'Electric', 'Special', 80, 100, 15, { ...ALL, effects: { status: { status: 'par', chance: 30 } } }),
@@ -59,17 +92,24 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Giga Drain', 'Grass', 'Special', 75, 100, 10, { effects: { drain: 50 } }),
   mv('Leaf Blade', 'Grass', 'Physical', 90, 100, 15, { highCrit: true }),
   mv('Spore', 'Grass', 'Status', 0, 100, 15, { effects: { status: { status: 'slp', chance: 100 } } }),
+  mv('Bullet Seed', 'Grass', 'Physical', 25, 100, 30, { effects: { multiHit: [2, 5] } }),
+  mv('Grassy Terrain', 'Grass', 'Status', 0, null, 10, { target: 'field', special: 'grassyTerrain' }),
   mv('Rage Powder', 'Bug', 'Status', 0, null, 20, { priority: 2, special: 'ragePowder' }),
   // Ice
   mv('Ice Beam', 'Ice', 'Special', 90, 100, 10, { effects: { status: { status: 'frz', chance: 10 } } }),
   mv('Ice Shard', 'Ice', 'Physical', 40, 100, 30, { priority: 1 }),
-  mv('Blizzard', 'Ice', 'Special', 110, 70, 5, { ...FOES, effects: { status: { status: 'frz', chance: 10 } } }),
+  mv('Blizzard', 'Ice', 'Special', 110, 70, 5, { ...FOES, special: 'snowAccuracy', effects: { status: { status: 'frz', chance: 10 } } }),
+  mv('Ice Punch', 'Ice', 'Physical', 75, 100, 15, { effects: { status: { status: 'frz', chance: 10 } } }),
+  mv('Icicle Spear', 'Ice', 'Physical', 25, 100, 30, { effects: { multiHit: [2, 5] } }),
+  mv('Snowscape', 'Ice', 'Status', 0, null, 10, { target: 'field', special: 'snowscape' }),
   mv('Icy Wind', 'Ice', 'Special', 55, 95, 15, { ...FOES, effects: { targetBoosts: { boosts: { spe: -1 }, chance: 100 } } }),
   mv('Icicle Crash', 'Ice', 'Physical', 85, 90, 10),
   // Fighting
   mv('Close Combat', 'Fighting', 'Physical', 120, 100, 5, { effects: { selfBoosts: { boosts: { def: -1, spd: -1 }, chance: 100 } } }),
   mv('Drain Punch', 'Fighting', 'Physical', 75, 100, 10, { effects: { drain: 50 } }),
   mv('Mach Punch', 'Fighting', 'Physical', 40, 100, 30, { priority: 1 }),
+  mv('Dynamic Punch', 'Fighting', 'Physical', 100, 50, 5, { effects: { confuse: 100 } }),
+  mv('Seismic Toss', 'Fighting', 'Physical', 1, 100, 20, { effects: { fixedDamage: 'level' } }),
   mv('Aura Sphere', 'Fighting', 'Special', 80, null, 20),
   mv('Coaching', 'Fighting', 'Status', 0, null, 10, { target: 'ally', effects: { targetBoosts: { boosts: { atk: 1, def: 1 }, chance: 100 } } }),
   mv('Quick Guard', 'Fighting', 'Status', 0, null, 15, { priority: 3, target: 'allySide', special: 'quickGuard' }),
@@ -82,10 +122,13 @@ export const MOVE_LIBRARY: Move[] = [
   mv('High Horsepower', 'Ground', 'Physical', 95, 95, 10),
   mv('Bulldoze', 'Ground', 'Physical', 60, 100, 20, { ...ALL, effects: { targetBoosts: { boosts: { spe: -1 }, chance: 100 } } }),
   mv('Earth Power', 'Ground', 'Special', 90, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),
+  mv('Sandstorm', 'Rock', 'Status', 0, null, 10, { target: 'field', special: 'sandstorm' }),
   // Flying
   mv('Brave Bird', 'Flying', 'Physical', 120, 100, 15, { effects: { recoil: 33 } }),
   mv('Air Slash', 'Flying', 'Special', 75, 95, 15, { effects: { flinch: 30 } }),
   mv('Tailwind', 'Flying', 'Status', 0, null, 15, { target: 'allySide', special: 'tailwind' }),
+  mv('Hurricane', 'Flying', 'Special', 110, 70, 10, { special: 'stormAccuracy', effects: { confuse: 30 } }),
+  mv('Dual Wingbeat', 'Flying', 'Physical', 40, 90, 10, { effects: { multiHit: [2, 2] } }),
   // Psychic
   mv('Psychic', 'Psychic', 'Special', 90, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),
   mv('Zen Headbutt', 'Psychic', 'Physical', 80, 90, 15),
@@ -95,18 +138,24 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Reflect', 'Psychic', 'Status', 0, null, 20, { target: 'allySide', special: 'reflect' }),
   mv('Light Screen', 'Psychic', 'Status', 0, null, 30, { target: 'allySide', special: 'lightScreen' }),
   mv('Ally Switch', 'Psychic', 'Status', 0, null, 15, { priority: 2, special: 'allySwitch' }),
+  mv('Instruct', 'Psychic', 'Status', 0, null, 15, { target: 'normal', special: 'instruct' }),
+  mv('Psychic Terrain', 'Psychic', 'Status', 0, null, 10, { target: 'field', special: 'psychicTerrain' }),
   mv('Heal Pulse', 'Psychic', 'Status', 0, null, 10, { target: 'normal', effects: { heal: 50 } }),
   // Bug
   mv('Bug Buzz', 'Bug', 'Special', 90, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),
   mv('X-Scissor', 'Bug', 'Physical', 80, 100, 15),
+  mv('Pin Missile', 'Bug', 'Physical', 25, 95, 20, { effects: { multiHit: [2, 5] } }),
   mv('Pollen Puff', 'Bug', 'Special', 90, 100, 15, { special: 'pollenPuff' }),
   // Rock
   mv('Stone Edge', 'Rock', 'Physical', 100, 80, 5, { highCrit: true }),
   mv('Rock Slide', 'Rock', 'Physical', 75, 90, 10, { ...FOES, effects: { flinch: 30 } }),
+  mv('Rock Blast', 'Rock', 'Physical', 25, 90, 10, { effects: { multiHit: [2, 5] } }),
   mv('Wide Guard', 'Rock', 'Status', 0, null, 10, { priority: 3, target: 'allySide', special: 'wideGuard' }),
   // Ghost
   mv('Shadow Ball', 'Ghost', 'Special', 80, 100, 15, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 20 } } }),
   mv('Shadow Sneak', 'Ghost', 'Physical', 40, 100, 30, { priority: 1 }),
+  mv('Night Shade', 'Ghost', 'Special', 1, 100, 15, { effects: { fixedDamage: 'level' } }),
+  mv('Confuse Ray', 'Ghost', 'Status', 0, 100, 10, { effects: { confuse: 100 } }),
   // Dragon
   mv('Dragon Claw', 'Dragon', 'Physical', 80, 100, 15),
   mv('Draco Meteor', 'Dragon', 'Special', 130, 90, 5, { effects: { selfBoosts: { boosts: { spa: -2 }, chance: 100 } } }),
@@ -116,6 +165,7 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Dark Pulse', 'Dark', 'Special', 80, 100, 15, { effects: { flinch: 20 } }),
   mv('Snarl', 'Dark', 'Special', 55, 95, 15, { ...FOES, effects: { targetBoosts: { boosts: { spa: -1 }, chance: 100 } } }),
   mv('Quash', 'Dark', 'Status', 0, 100, 15, { target: 'normal', special: 'quash' }),
+  mv('Beat Up', 'Dark', 'Physical', 1, 100, 10, { special: 'beatUp' }),
   // Steel
   mv('Iron Head', 'Steel', 'Physical', 80, 100, 15, { effects: { flinch: 30 } }),
   mv('Flash Cannon', 'Steel', 'Special', 80, 100, 10, { effects: { targetBoosts: { boosts: { spd: -1 }, chance: 10 } } }),
@@ -126,6 +176,7 @@ export const MOVE_LIBRARY: Move[] = [
   mv('Dazzling Gleam', 'Fairy', 'Special', 80, 100, 10, FOES),
   mv('Decorate', 'Fairy', 'Status', 0, null, 15, { target: 'normal', effects: { targetBoosts: { boosts: { atk: 2, spa: 2 }, chance: 100 } } }),
   mv('Aromatic Mist', 'Fairy', 'Status', 0, null, 20, { target: 'ally', effects: { targetBoosts: { boosts: { spd: 1 }, chance: 100 } } }),
+  mv('Misty Terrain', 'Fairy', 'Status', 0, null, 10, { target: 'field', special: 'mistyTerrain' }),
   // Status: stat changes and healing
   mv('Swords Dance', 'Normal', 'Status', 0, null, 20, { effects: { selfBoosts: { boosts: { atk: 2 }, chance: 100 } } }),
   mv('Nasty Plot', 'Dark', 'Status', 0, null, 20, { effects: { selfBoosts: { boosts: { spa: 2 }, chance: 100 } } }),
@@ -186,9 +237,9 @@ export const PRESET_BUILDS: PokemonBuild[] = [
   preset('Bramblehorn', 'Grass', 'Ground', 'Adamant', [100, 120, 100, 60, 80, 60],
     { hp: 252, atk: 252, def: 4 }, ['High Horsepower', 'Leaf Blade', 'Rock Slide', 'Protect'], 'Sap Sipper', 'Assault Vest'),
   preset('Tidewarden', 'Water', 'Steel', 'Calm', [95, 75, 110, 90, 105, 55],
-    { hp: 252, spd: 252, def: 4 }, ['Scald', 'Flash Cannon', 'Follow Me', 'Life Dew'], 'Friend Guard', 'Mystic Water'),
+    { hp: 252, spd: 252, def: 4 }, ['Scald', 'Flash Cannon', 'Follow Me', 'Life Dew'], 'Friend Guard', 'Leftovers'),
   preset('Voltwing', 'Electric', 'Flying', 'Timid', [75, 70, 70, 115, 75, 120],
-    { spa: 252, spe: 252, hp: 4 }, ['Thunderbolt', 'Air Slash', 'Tailwind', 'Protect'], 'Levitate', 'Choice Specs'),
+    { spa: 252, spe: 252, hp: 4 }, ['Thunder', 'Hurricane', 'Tailwind', 'Protect'], 'Drizzle', 'Damp Rock'),
   preset('Gloomshade', 'Ghost', 'Fairy', 'Modest', [70, 60, 80, 115, 100, 95],
     { spa: 252, spe: 252, hp: 4 }, ['Shadow Ball', 'Dazzling Gleam', 'Helping Hand', 'Trick Room'], 'Prankster', 'Focus Sash'),
   preset('Rokdrake', 'Dragon', 'Fighting', 'Adamant', [90, 125, 90, 70, 80, 95],

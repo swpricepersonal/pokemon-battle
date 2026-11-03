@@ -2,24 +2,26 @@ import { useEffect, useRef, useState } from 'react';
 import { BattleView } from './components/BattleView';
 import { BuildEditor } from './components/BuildEditor';
 import { TypeBadge } from './components/common';
-import { activeCount, createBattle, runTurn } from './engine/battle';
+import { activeCount, createBattle, mathRng, runTurn } from './engine/battle';
 import type { BattleState, TurnChoices } from './engine/battle';
 import { validateBuild } from './engine/stats';
-import type { Format, PokemonBuild } from './engine/types';
+import { TERRAINS, TERRAIN_LABELS, WEATHERS, WEATHER_LABELS } from './engine/types';
+import type { Format, PokemonBuild, Terrain, Weather } from './engine/types';
 import { defaultTeams, loadLibrary, loadTeams, normalizeBuild, saveLibrary, saveTeams } from './storage';
-import type { Teams } from './storage';
+import type { FieldChoice, Teams } from './storage';
 
 const saved = loadTeams();
 
 export default function App() {
   const [teams, setTeams] = useState<Teams>(() => saved?.teams ?? defaultTeams());
   const [format, setFormat] = useState<Format>(() => saved?.format ?? 'singles');
+  const [field, setField] = useState<FieldChoice>(() => saved?.field ?? { weather: null, terrain: null });
   const [activeSlot, setActiveSlot] = useState<[number, number]>([0, 0]);
   const [library, setLibrary] = useState(loadLibrary);
   const [battle, setBattle] = useState<BattleState | null>(null);
   const [notice, setNotice] = useState('');
 
-  useEffect(() => { saveTeams(teams, format); }, [teams, format]);
+  useEffect(() => { saveTeams(teams, format, field); }, [teams, format, field]);
   useEffect(() => { saveLibrary(library); }, [library]);
   useEffect(() => {
     if (!notice) return;
@@ -48,7 +50,7 @@ export default function App() {
 
   const inPlay = teams.map((t) => t.slice(0, n));
   const canBattle = inPlay.every((t) => t.every((b) => validateBuild(b).length === 0));
-  const start = () => setBattle(createBattle(teams, format));
+  const start = () => setBattle(createBattle(teams, format, mathRng, field));
 
   if (battle) {
     return (
@@ -73,6 +75,18 @@ export default function App() {
             </button>
           ))}
         </div>
+        <label className="inline field-select" htmlFor="start-weather">Weather
+          <select id="start-weather" value={field.weather ?? ''} onChange={(e) => setField({ ...field, weather: (e.target.value || null) as Weather | null })}>
+            <option value="">None</option>
+            {WEATHERS.map((w) => <option key={w} value={w}>{WEATHER_LABELS[w]}</option>)}
+          </select>
+        </label>
+        <label className="inline field-select" htmlFor="start-terrain">Terrain
+          <select id="start-terrain" value={field.terrain ?? ''} onChange={(e) => setField({ ...field, terrain: (e.target.value || null) as Terrain | null })}>
+            <option value="">None</option>
+            {TERRAINS.map((t) => <option key={t} value={t}>{TERRAIN_LABELS[t]}</option>)}
+          </select>
+        </label>
         <button className="primary big" disabled={!canBattle} onClick={start}>Start battle</button>
         {!canBattle && <span className="muted">Fix the errors below to start.</span>}
         <button className="ghost" onClick={() => setTeams(([a, b]) => [b, a])}>Swap sides</button>

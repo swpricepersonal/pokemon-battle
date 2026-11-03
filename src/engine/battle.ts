@@ -1,4 +1,4 @@
-import { abilityName, defenderAbility, getAbility, hasSecondary } from './abilities';
+import { abilityName, defenderAbility, getAbility, hasSecondary, isGrounded } from './abilities';
 import { CRIT_CHANCES, calcDamage, typeEffectiveness, typesOf } from './damage';
 import type { DamageBreakdown } from './damage';
 import { getItem } from './items';
@@ -6,9 +6,10 @@ import { applyMod, chainMods } from './modifiers';
 import { accuracyStageMultiplier, calcAllStats, clampStage, stageMultiplier } from './stats';
 import { BOOST_LABELS } from './types';
 import type {
-  BattlePokemon, BoostableStat, Boosts, Format, MajorStatus, Move, PokemonBuild, Side, TurnVolatiles,
+  BattlePokemon, BoostableStat, Boosts, Format, MajorStatus, Move, PokemonBuild, Side, Terrain, TurnVolatiles, TypeName, Weather,
 } from './types';
-import type { ImmunityResult } from './abilities';
+import { TERRAIN_LABELS, WEATHER_LABELS } from './types';
+import type { AbilityDef, ImmunityResult } from './abilities';
 
 export type { Side } from './types';
 
@@ -37,6 +38,12 @@ export interface BattleState {
   format: Format;
   sides: [SideState, SideState];
   trickRoom: number;
+  weather: Weather | null;
+  /** Turns of weather left; -1 means it lasts the whole battle. */
+  weatherTurns: number;
+  terrain: Terrain | null;
+  /** Turns of terrain left; -1 means it lasts the whole battle. */
+  terrainTurns: number;
   turn: number;
   winner: Side | 'draw' | null;
   log: LogEntry[];
@@ -113,17 +120,26 @@ export function createBattlePokemon(build: PokemonBuild, side: Side = 0, slot = 
     turnsActive: 0,
     flashFire: false,
     faintLogged: false,
+    confusion: 0,
+    lastAction: null,
     vol: freshVolatiles(),
   };
 }
 
 export const activeCount = (format: Format) => (format === 'doubles' ? 2 : 1);
 
+/** Weather and terrain that are in place for the whole battle. */
+export interface FieldSetup {
+  weather?: Weather | null;
+  terrain?: Terrain | null;
+}
+
 /** Create a battle from each side's team (the first 1 or 2 builds are used). */
 export function createBattle(
   teams: [PokemonBuild[], PokemonBuild[]],
   format: Format = 'singles',
   rng: Rng = mathRng,
+  setup: FieldSetup = {},
 ): BattleState {
   const n = activeCount(format);
   const picked = teams.map((t) => t.slice(0, n)) as [PokemonBuild[], PokemonBuild[]];
@@ -140,9 +156,15 @@ export function createBattle(
     mons: team.map((b, slot) => createBattlePokemon(b, side as Side, slot, display(side, slot))),
     tailwind: 0, reflect: 0, lightScreen: 0, wideGuard: false, quickGuard: false,
   })) as [SideState, SideState];
-  const state: BattleState = { format, sides, trickRoom: 0, turn: 0, winner: null, log: [] };
+  const state: BattleState = {
+    format, sides, trickRoom: 0, turn: 0, winner: null, log: [],
+    weather: setup.weather ?? null, weatherTurns: setup.weather ? -1 : 0,
+    terrain: setup.terrain ?? null, terrainTurns: setup.terrain ? -1 : 0,
+  };
   const teamName = (s: SideState) => s.mons.map((m) => m.name).join(' & ');
   state.log.push({ turn: 0, kind: 'info', text: `${teamName(sides[0])} vs. ${teamName(sides[1])}: battle start!` });
+  if (state.weather) state.log.push({ turn: 0, kind: 'field', text: `${WEATHER_LABELS[state.weather]} covers the field for the whole battle.` });
+  if (state.terrain) state.log.push({ turn: 0, kind: 'field', text: `${TERRAIN_LABELS[state.terrain]} covers the field for the whole battle.` });
   new TurnRunner(state, rng).startOfBattle();
   return state;
 }
@@ -210,12 +232,34 @@ export function defaultTarget(state: BattleState, mon: BattlePokemon): TargetRef
   return validTargets(state, mon)[0];
 }
 
+/** The weather currently in effect (none while a Cloud Nine / Air Lock Pokémon is active). */
+export function activeWeather(state: BattleState): Weather | null {
+  if (!state.weather) return null;
+  return allMons(state).some((m) => isAlive(m) && getAbility(m)?.negatesWeather) ? null : state.weather;
+}
+
+/** Damage options that come from the field. */
+export function fieldDamageOpts(state: BattleState) {
+  return { weather: activeWeather(state), terrain: state.terrain, doubles: state.format === 'doubles' };
+}
+
+const WEATHER_BALL_TYPE: Record<Weather, TypeName> = { sun: 'Fire', rain: 'Water', sand: 'Rock', snow: 'Ice' };
+
+/** The move as it will actually be used (Weather Ball changes type and power with the weather). */
+export function effectiveMove(state: BattleState, move: Move): Move {
+  if (move.special === 'weatherBall') {
+    const w = activeWeather(state);
+    if (w) return { ...move, type: WEATHER_BALL_TYPE[w], power: move.power * 2 };
+  }
+  return move;
+}
+
 /** Speed after stat stages, abilities, items, Tailwind and paralysis. */
 export function effectiveSpeed(state: BattleState, mon: BattlePokemon): number {
   const base = Math.floor(mon.stats.spe * stageMultiplier(mon.boosts.spe));
   const mods: number[] = [];
   const ab = getAbility(mon);
-  if (ab?.speed) mods.push(ab.speed(mon));
+  if (ab?.speed) mods.push(ab.speed(mon, activeWeather(state), state.terrain));
   const item = getItem(mon);
   if (item?.speed) mods.push(item.speed);
   if (state.sides[mon.side].tailwind > 0) mods.push(2);
@@ -247,6 +291,21 @@ const STATUS_INFLICT_TEXT: Record<MajorStatus, string> = {
   tox: 'was badly poisoned!',
   slp: 'fell asleep!',
   frz: 'was frozen solid!',
+};
+
+const STATUS_CURE_TEXT: Record<MajorStatus, string> = {
+  brn: 'burn', par: 'paralysis', psn: 'poison', tox: 'poison', slp: 'sleep', frz: 'freeze',
+};
+
+/** The 40-power typeless physical hit a confused Pokémon deals to itself. */
+const CONFUSION_HIT: Move = {
+  name: 'Confusion damage', type: 'Normal', category: 'Physical', power: 40, accuracy: null, pp: 1, priority: 0,
+  highCrit: false, target: 'self', effects: {},
+};
+
+const WEATHER_SPECIALS: Partial<Record<string, Weather>> = { sunnyDay: 'sun', rainDance: 'rain', sandstorm: 'sand', snowscape: 'snow' };
+const TERRAIN_SPECIALS: Partial<Record<string, Terrain>> = {
+  electricTerrain: 'electric', grassyTerrain: 'grassy', psychicTerrain: 'psychic', mistyTerrain: 'misty',
 };
 
 const PROTECT_MOVES = new Set(['protect', 'wideGuard', 'quickGuard']);
@@ -290,11 +349,22 @@ class TurnRunner {
   startOfBattle() {
     for (const mon of this.speedOrder(allMons(this.s))) {
       const ab = getAbility(mon);
+      if (ab?.onStartWeather) {
+        this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+        this.setWeather(mon, ab.onStartWeather);
+      }
+      if (ab?.onStartTerrain) {
+        this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
+        this.setTerrain(mon, ab.onStartTerrain);
+      }
+      if (ab?.negatesWeather && this.s.weather) {
+        this.log('info', `${mon.name}'s ${abilityName(mon)}: the effects of the weather disappeared.`, mon.side);
+      }
       if (!ab?.onStartFoeBoosts) continue;
       this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
       for (const foe of foesOf(this.s, mon)) {
         const fAb = defenderAbility(foe, mon);
-        if (fAb?.innerFocus) {
+        if (fAb?.innerFocus || fAb?.ownTempo) {
           this.log('info', `${foe.name}'s ${abilityName(foe)} kept it from being affected!`, foe.side);
           continue;
         }
@@ -303,13 +373,44 @@ class TurnRunner {
     }
   }
 
+  // ---------- Field ----------
+
+  get weather() {
+    return activeWeather(this.s);
+  }
+
+  /** Returns false if that weather is already active. */
+  setWeather(source: BattlePokemon, weather: Weather): boolean {
+    if (this.s.weather === weather && this.s.weatherTurns !== -1) return false;
+    this.s.weather = weather;
+    this.s.weatherTurns = getItem(source)?.extendsWeather === weather ? 8 : 5;
+    const text: Record<Weather, string> = {
+      sun: 'The sunlight turned harsh!', rain: 'It started to rain!', sand: 'A sandstorm kicked up!', snow: 'It started to snow!',
+    };
+    this.log('field', text[weather], source.side);
+    return true;
+  }
+
+  setTerrain(source: BattlePokemon, terrain: Terrain): boolean {
+    if (this.s.terrain === terrain && this.s.terrainTurns !== -1) return false;
+    this.s.terrain = terrain;
+    this.s.terrainTurns = getItem(source)?.extendsTerrain ? 8 : 5;
+    this.log('field', `${TERRAIN_LABELS[terrain]} covered the battlefield!`, source.side);
+    return true;
+  }
+
   // ---------- Status, stats, HP ----------
 
   canInflict(mon: BattlePokemon, status: MajorStatus, source: BattlePokemon | null): boolean {
     if (mon.status !== null || mon.currentHp <= 0) return false;
     if (typesOf(mon).some((t) => STATUS_IMMUNITY[status].includes(t))) return false;
     const ab = source ? defenderAbility(mon, source) : getAbility(mon);
-    return !ab?.statusImmune?.includes(status);
+    if (ab?.statusImmune?.includes(status)) return false;
+    if (ab?.leafGuard && this.weather === 'sun') return false;
+    if (status === 'frz' && this.weather === 'sun') return false;
+    if (isGrounded(mon) && this.s.terrain === 'misty') return false;
+    if (status === 'slp' && isGrounded(mon) && this.s.terrain === 'electric') return false;
+    return true;
   }
 
   inflict(mon: BattlePokemon, status: MajorStatus) {
@@ -317,6 +418,43 @@ class TurnRunner {
     if (status === 'slp') mon.sleepTurns = 1 + Math.floor(this.rng.next() * 3);
     if (status === 'tox') mon.toxicCounter = 0;
     this.log('status', `${mon.name} ${STATUS_INFLICT_TEXT[status]}`, mon.side);
+    this.checkLum(mon);
+  }
+
+  /** Confuse a Pokémon. `announceFail` logs why it didn't work (for status moves). */
+  confuse(mon: BattlePokemon, source: BattlePokemon | null, announceFail: boolean) {
+    if (!isAlive(mon)) return;
+    const ab = source ? defenderAbility(mon, source) : getAbility(mon);
+    if (mon.confusion > 0) {
+      if (announceFail) this.log('info', `${mon.name} is already confused!`, mon.side);
+      return;
+    }
+    if (ab?.ownTempo || (isGrounded(mon) && this.s.terrain === 'misty')) {
+      if (announceFail) this.fail();
+      return;
+    }
+    mon.confusion = 2 + Math.floor(this.rng.next() * 4);
+    this.log('status', `${mon.name} became confused!`, mon.side);
+    this.checkLum(mon);
+  }
+
+  checkLum(mon: BattlePokemon) {
+    if (!getItem(mon)?.lum || (!mon.status && !mon.confusion)) return;
+    const what = mon.status ? STATUS_CURE_TEXT[mon.status] : 'confusion';
+    mon.status = null;
+    mon.confusion = 0;
+    mon.item = '';
+    this.log('heal', `${mon.name}'s Lum Berry cured its ${what}!`, mon.side);
+  }
+
+  /** Sitrus / Oran Berry: heal at half HP or less. */
+  checkPinchBerry(mon: BattlePokemon) {
+    const item = getItem(mon);
+    if (!item?.pinchHeal || !isAlive(mon) || mon.currentHp > mon.stats.hp / 2) return;
+    const amount = item.pinchHeal.flat ? item.pinchHeal.amount : Math.floor(mon.stats.hp * item.pinchHeal.amount);
+    const name = mon.item;
+    mon.item = '';
+    this.heal(mon, amount, `restored HP with its ${name}`);
   }
 
   /** Apply stat-stage changes. `source` is the Pokémon causing them (null for self-inflicted). */
@@ -367,6 +505,7 @@ class TurnRunner {
     if (lost <= 0) return;
     mon.currentHp -= lost;
     this.log('damage', `${mon.name} ${reason} (-${lost} HP, ${pct(lost, mon.stats.hp)}).`, mon.side);
+    this.checkPinchBerry(mon);
   }
 
   // ---------- Turn order ----------
@@ -458,6 +597,23 @@ class TurnRunner {
         return false;
       }
     }
+    if (mon.confusion > 0) {
+      mon.confusion--;
+      if (mon.confusion === 0) {
+        this.log('status', `${mon.name} snapped out of its confusion!`, mon.side);
+      } else {
+        this.log('status', `${mon.name} is confused!`, mon.side);
+        if (this.rng.next() < 1 / 3) {
+          const roll = 85 + Math.floor(this.rng.next() * 16);
+          const bd = calcDamage(mon, mon, CONFUSION_HIT, { crit: false, roll, typeless: true });
+          const dealt = Math.min(bd.damage, mon.currentHp);
+          mon.currentHp -= dealt;
+          this.log('damage', `It hurt itself in its confusion! (-${dealt} HP, ${pct(dealt, mon.stats.hp)})`, mon.side, bd);
+          this.checkPinchBerry(mon);
+          return false;
+        }
+      }
+    }
     if (mon.status === 'par' && this.rng.next() < 0.25) {
       this.log('status', `${mon.name} is fully paralyzed! It can't move!`, mon.side);
       return false;
@@ -469,12 +625,12 @@ class TurnRunner {
     this.log('info', 'But it failed!');
   }
 
-  executeAction(entry: QueueEntry) {
-    const { mon: user, move, action } = entry;
+  executeAction(entry: QueueEntry, instructed = false) {
+    const { mon: user, action } = entry;
     if (!isAlive(user)) return;
     user.vol.moved = true;
 
-    if (user.vol.flinched) {
+    if (user.vol.flinched && !instructed) {
       this.log('status', `${user.name} flinched and couldn't move!`, user.side);
       user.protectStreak = 0;
       return;
@@ -490,13 +646,26 @@ class TurnRunner {
     } else {
       user.pp[action.move] = Math.max(0, user.pp[action.move] - 1);
       if (getItem(user)?.choice && user.choiceLock === null) user.choiceLock = action.move;
+      user.lastAction = { move: action.move, target: action.target };
     }
+    const move = effectiveMove(this.s, entry.move);
     this.log('move', `${user.name} used ${move.name}!`, user.side);
 
     const sp = move.special;
     if (!sp || !PROTECT_MOVES.has(sp)) user.protectStreak = 0;
     const side = this.s.sides[user.side];
     const ally = this.ally(user);
+
+    const weather = sp ? WEATHER_SPECIALS[sp] : undefined;
+    if (weather) {
+      if (!this.setWeather(user, weather)) this.fail();
+      return;
+    }
+    const terrain = sp ? TERRAIN_SPECIALS[sp] : undefined;
+    if (terrain) {
+      if (!this.setTerrain(user, terrain)) this.fail();
+      return;
+    }
 
     switch (sp) {
       case 'protect':
@@ -548,13 +717,14 @@ class TurnRunner {
       return;
     }
 
-    if (sp === 'spotlight' || sp === 'afterYou' || sp === 'quash') {
+    if (sp === 'spotlight' || sp === 'afterYou' || sp === 'quash' || sp === 'instruct') {
       const t = targets[0];
       if (t === user) return this.fail();
       if (sp === 'spotlight') {
         t.vol.centerOfAttention = 'followMe';
         return this.log('info', `${t.name} became the center of attention!`, t.side);
       }
+      if (sp === 'instruct') return this.doInstruct(t);
       const idx = this.queue.findIndex((e) => e.mon === t);
       if (idx < 0) return this.fail();
       const [e] = this.queue.splice(idx, 1);
@@ -604,12 +774,14 @@ class TurnRunner {
     const e = move.effects;
     if (damaging && totalDealt > 0 && isAlive(user)) {
       if (e.drain) this.heal(user, Math.max(1, Math.floor((totalDealt * e.drain) / 100)), 'drained energy');
+      const bell = getItem(user)?.shellBell;
+      if (bell) this.heal(user, Math.max(1, Math.floor(totalDealt * bell)), 'restored HP with its Shell Bell');
       if (struggle) {
         this.hurt(user, Math.max(1, Math.round(user.stats.hp / 4)), 'is damaged by recoil');
       } else if (e.recoil && !aAb?.rockHead && !aAb?.magicGuard) {
         this.hurt(user, Math.max(1, Math.floor((totalDealt * e.recoil) / 100)), 'is damaged by recoil');
       }
-      if (getItem(user)?.lifeOrb && !aAb?.magicGuard && !sheerForce) {
+      if (isAlive(user) && getItem(user)?.lifeOrb && !aAb?.magicGuard && !sheerForce) {
         this.hurt(user, Math.max(1, Math.floor(user.stats.hp / 10)), 'lost some of its HP to its Life Orb');
       }
     }
@@ -617,6 +789,15 @@ class TurnRunner {
       const chance = e.selfBoosts.chance * (aAb?.sereneGrace ? 2 : 1);
       if (chanceHit(chance, this.rng)) this.applyBoosts(user, e.selfBoosts.boosts, null);
     }
+  }
+
+  /** Instruct: the target immediately uses its last move again. */
+  doInstruct(t: BattlePokemon) {
+    const last = t.lastAction;
+    const move = last ? t.build.moves[last.move] : null;
+    if (!last || !move || move.special === 'instruct' || t.pp[last.move] <= 0 || !isAlive(t)) return this.fail();
+    this.log('info', `${t.name} followed the instructions!`, t.side);
+    this.executeAction({ mon: t, action: last, move, priority: movePriority(t, move), tiebreak: 0 }, true);
   }
 
   doProtect(user: BattlePokemon, kind: 'protect' | 'wideGuard' | 'quickGuard') {
@@ -690,6 +871,10 @@ class TurnRunner {
       this.log('info', `Quick Guard protected ${t.name}!`, t.side);
       return true;
     }
+    if (this.s.terrain === 'psychic' && entry.priority > 0 && user.side !== t.side && isGrounded(t)) {
+      this.log('info', `${t.name} is protected by the Psychic Terrain!`, t.side);
+      return true;
+    }
     return false;
   }
 
@@ -697,11 +882,18 @@ class TurnRunner {
     if (move.accuracy === null) return true;
     const aAb = getAbility(user);
     if (aAb?.noGuard || getAbility(t)?.noGuard) return true;
+    const w = this.weather;
+    let accuracy = move.accuracy;
+    if (move.special === 'stormAccuracy') {
+      if (w === 'rain') return true;
+      if (w === 'sun') accuracy = 50;
+    }
+    if (move.special === 'snowAccuracy' && w === 'snow') return true;
     const tAb = defenderAbility(t, user);
     const accStage = tAb?.unaware ? 0 : user.boosts.accuracy;
     const evaStage = aAb?.unaware ? 0 : t.boosts.evasion;
     const stage = clampStage(accStage - evaStage);
-    const chance = move.accuracy * accuracyStageMultiplier(stage) * (aAb?.accuracy?.(move) ?? 1);
+    const chance = accuracy * accuracyStageMultiplier(stage) * (aAb?.accuracy?.(move) ?? 1) * (tAb?.accuracyAgainst?.(w) ?? 1);
     return this.rng.next() * 100 < chance;
   }
 
@@ -723,33 +915,42 @@ class TurnRunner {
     this.log('info', `It doesn't affect ${t.name}... (${abilityName(t)})`, t.side);
   }
 
-  /** Runs a damaging move against one target. Returns damage dealt, or null if it had no effect. */
-  hit(user: BattlePokemon, t: BattlePokemon, move: Move, typeless: boolean, spread: boolean, sheerForce: boolean): number | null {
-    const eff = typeEffectiveness(user, t, move, typeless);
-    const tAb = defenderAbility(t, user);
-    const aAb = getAbility(user);
-    const imm = tAb?.immune?.({ attacker: user, defender: t, move, eff, crit: false, fromAlly: t.side === user.side });
-    if (imm) {
-      this.handleImmunity(t, imm);
-      return null;
+  /** Base powers for each hit of the move (one entry for single-hit moves). */
+  hitPowers(user: BattlePokemon, move: Move): number[] {
+    if (move.special === 'beatUp') {
+      const party = this.s.sides[user.side].mons.filter((m) => m === user || (isAlive(m) && !m.status));
+      return party.map((m) => 5 + Math.floor(m.build.baseStats.atk / 10));
     }
-    if (eff === 0) {
-      this.log('info', `It doesn't affect ${t.name}...`, t.side);
-      return null;
+    const range = move.effects.multiHit;
+    if (!range) return [move.power];
+    const [min, max] = range;
+    let hits = min;
+    if (getAbility(user)?.skillLink) hits = max;
+    else if (min === 2 && max === 5) {
+      const r = this.rng.next();
+      hits = r < 0.35 ? 2 : r < 0.7 ? 3 : r < 0.85 ? 4 : 5;
+    } else if (max > min) hits = min + Math.floor(this.rng.next() * (max - min + 1));
+    return Array(hits).fill(move.power);
+  }
+
+  /** Effects on a Pokémon that made contact with `t`. */
+  contactEffects(user: BattlePokemon, t: BattlePokemon, move: Move) {
+    if (!move.flags?.includes('contact') || !isAlive(user)) return;
+    const tAb = getAbility(t);
+    const uAb = getAbility(user);
+    const c = tAb?.onContact;
+    if (c?.damage && !uAb?.magicGuard) this.hurt(user, Math.max(1, Math.floor(user.stats.hp * c.damage)), `was hurt by ${t.name}'s ${abilityName(t)}`);
+    if (c?.status && isAlive(t) && isAlive(user) && this.canInflict(user, c.status.status, null) && chanceHit(c.status.chance, this.rng)) {
+      this.log('info', `${t.name}'s ${abilityName(t)}!`, t.side);
+      this.inflict(user, c.status.status);
     }
+    const helmet = getItem(t)?.contactDamage;
+    if (helmet && isAlive(user) && !uAb?.magicGuard) this.hurt(user, Math.max(1, Math.floor(user.stats.hp * helmet)), `was hurt by ${t.name}'s ${t.item}`);
+  }
 
-    const critStage = Math.min(3, (move.highCrit ? 1 : 0) + (aAb?.critStage ?? 0));
-    const critRoll = this.rng.next();
-    const crit = !tAb?.critImmune && critRoll < CRIT_CHANCES[critStage];
-    const roll = 85 + Math.floor(this.rng.next() * 16);
-    const tSide = this.s.sides[t.side];
-    const screen = move.category === 'Physical' ? tSide.reflect > 0 : tSide.lightScreen > 0;
-    const bd = calcDamage(user, t, move, {
-      crit, roll, typeless, spread, helpingHand: user.vol.helpingHand, screen, doubles: this.doubles,
-      attackerAlly: this.ally(user), defenderAlly: this.ally(t),
-    });
-
-    let dmg = bd.damage;
+  /** Apply damage to the target with Sturdy / Focus Sash. Returns HP lost. */
+  applyHitDamage(t: BattlePokemon, damage: number, tAb: AbilityDef | null): { dealt: number; endure: string } {
+    let dmg = damage;
     let endure = '';
     if (t.currentHp === t.stats.hp && dmg >= t.currentHp) {
       if (tAb?.sturdy) {
@@ -761,19 +962,71 @@ class TurnRunner {
         t.item = '';
       }
     }
-    if (bd.resistBerry) {
-      this.log('info', `${t.name}'s ${t.item} weakened the damage!`, t.side);
-      t.item = '';
-    }
     const dealt = Math.min(dmg, t.currentHp);
     t.currentHp -= dealt;
+    return { dealt, endure };
+  }
 
+  /** Runs a damaging move against one target. Returns damage dealt, or null if it had no effect. */
+  hit(user: BattlePokemon, t: BattlePokemon, move: Move, typeless: boolean, spread: boolean, sheerForce: boolean): number | null {
+    const eff = typeEffectiveness(user, t, move, typeless);
+    const tAb = defenderAbility(t, user);
+    const aAb = getAbility(user);
+    const field = fieldDamageOpts(this.s);
+    const imm = tAb?.immune?.({ attacker: user, defender: t, move, eff, crit: false, fromAlly: t.side === user.side, ...field });
+    if (imm) {
+      this.handleImmunity(t, imm);
+      return null;
+    }
+    if (eff === 0) {
+      this.log('info', `It doesn't affect ${t.name}...`, t.side);
+      return null;
+    }
     const on = spread ? ` on ${t.name}` : '';
-    if (crit) this.log('info', `A critical hit${on}!`, user.side);
-    if (eff > 1) this.log('info', `It's super effective${on}!`, user.side);
-    if (eff < 1) this.log('info', `It's not very effective${on}...`, user.side);
-    this.log('damage', `${t.name} lost ${dealt} HP (${pct(dealt, t.stats.hp)}).`, t.side, bd);
-    if (endure) this.log('info', endure, t.side);
+
+    // Fixed-damage moves skip the formula entirely.
+    const fixed = move.effects.fixedDamage;
+    if (fixed !== undefined) {
+      const amount = fixed === 'level' ? user.build.level : fixed === 'halfHp' ? Math.max(1, Math.floor(t.currentHp / 2)) : fixed;
+      const { dealt, endure } = this.applyHitDamage(t, amount, tAb);
+      this.log('damage', `${t.name} lost ${dealt} HP (${pct(dealt, t.stats.hp)}).`, t.side);
+      if (endure) this.log('info', endure, t.side);
+      this.contactEffects(user, t, move);
+      this.checkPinchBerry(t);
+      return dealt;
+    }
+
+    const powers = this.hitPowers(user, move);
+    const tSide = this.s.sides[t.side];
+    const screen = move.category === 'Physical' ? tSide.reflect > 0 : tSide.lightScreen > 0;
+    let total = 0;
+    let hits = 0;
+    for (const power of powers) {
+      if (!isAlive(t) || !isAlive(user)) break;
+      const m = power === move.power ? move : { ...move, power };
+      const critStage = Math.min(3, (m.highCrit ? 1 : 0) + (aAb?.critStage ?? 0));
+      const crit = this.rng.next() < CRIT_CHANCES[critStage] && !tAb?.critImmune;
+      const roll = 85 + Math.floor(this.rng.next() * 16);
+      const bd = calcDamage(user, t, m, {
+        crit, roll, typeless, spread, helpingHand: user.vol.helpingHand, screen, ...field,
+        attackerAlly: this.ally(user), defenderAlly: this.ally(t),
+      });
+      if (bd.resistBerry) {
+        this.log('info', `${t.name}'s ${t.item} weakened the damage!`, t.side);
+        t.item = '';
+      }
+      const { dealt, endure } = this.applyHitDamage(t, bd.damage, tAb);
+      total += dealt;
+      hits++;
+      if (crit) this.log('info', `A critical hit${on}!`, user.side);
+      if (hits === 1 && eff > 1) this.log('info', `It's super effective${on}!`, user.side);
+      if (hits === 1 && eff < 1) this.log('info', `It's not very effective${on}...`, user.side);
+      this.log('damage', `${t.name} lost ${dealt} HP (${pct(dealt, t.stats.hp)}).`, t.side, bd);
+      if (endure) this.log('info', endure, t.side);
+      this.contactEffects(user, t, move);
+      this.checkPinchBerry(t);
+    }
+    if (powers.length > 1) this.log('info', `Hit ${hits} time${hits === 1 ? '' : 's'}!`, user.side);
 
     if (t.currentHp > 0 && t.status === 'frz' && move.type === 'Fire') {
       t.status = null;
@@ -789,11 +1042,12 @@ class TurnRunner {
       if (e.targetBoosts && chanceHit(e.targetBoosts.chance * mult, this.rng)) {
         this.applyBoosts(t, e.targetBoosts.boosts, user);
       }
+      if (e.confuse && chanceHit(e.confuse * mult, this.rng)) this.confuse(t, user, false);
       if (e.flinch && !t.vol.moved && !tAb?.innerFocus && chanceHit(e.flinch * mult, this.rng)) {
         t.vol.flinched = true;
       }
     }
-    return dealt;
+    return total;
   }
 
   /** Runs a status move against one target. Returns true if it took effect. */
@@ -809,7 +1063,7 @@ class TurnRunner {
         this.log('info', `It doesn't affect ${t.name}...`, t.side);
         return false;
       }
-      const imm = defenderAbility(t, user)?.immune?.({ attacker: user, defender: t, move, eff: 1, crit: false, fromAlly: t.side === user.side });
+      const imm = defenderAbility(t, user)?.immune?.({ attacker: user, defender: t, move, eff: 1, crit: false, fromAlly: t.side === user.side, ...fieldDamageOpts(this.s) });
       if (imm) {
         this.handleImmunity(t, imm);
         return false;
@@ -830,14 +1084,47 @@ class TurnRunner {
       this.applyBoosts(t, e.targetBoosts.boosts, t === user ? null : user);
       acted = true;
     }
+    if (e.confuse) {
+      if (chanceHit(e.confuse, this.rng)) this.confuse(t, t === user ? null : user, true);
+      acted = true;
+    }
     if (!acted && !e.selfBoosts) this.log('info', 'But nothing happened!');
     return true;
   }
 
   endOfTurn() {
-    const order = this.speedOrder(allMons(this.s).filter(isAlive));
-    for (const mon of order) {
-      if (!isAlive(mon)) continue;
+    const order = () => this.speedOrder(allMons(this.s).filter(isAlive));
+    const w = this.weather;
+
+    // Weather damage and weather-based abilities
+    if (w === 'sand') {
+      for (const mon of order()) {
+        const ab = getAbility(mon);
+        if (typesOf(mon).some((t) => t === 'Rock' || t === 'Ground' || t === 'Steel') || ab?.sandImmune || ab?.magicGuard) continue;
+        this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp / 16)), 'is buffeted by the sandstorm');
+      }
+    }
+    for (const mon of order()) {
+      const ab = getAbility(mon);
+      const frac = ab?.endOfTurnHp?.(w) ?? 0;
+      if (frac > 0) this.heal(mon, Math.max(1, Math.floor(mon.stats.hp * frac)), `restored HP with its ${abilityName(mon)}`);
+      if (frac < 0 && !ab?.magicGuard) this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp * -frac)), `was hurt by its ${abilityName(mon)}`);
+      if (ab?.cureIn && ab.cureIn === w && mon.status) {
+        this.log('heal', `${mon.name}'s ${abilityName(mon)} cured its ${STATUS_CURE_TEXT[mon.status]}!`, mon.side);
+        mon.status = null;
+      }
+    }
+    if (this.s.terrain === 'grassy') {
+      for (const mon of order()) if (isGrounded(mon)) this.heal(mon, Math.max(1, Math.floor(mon.stats.hp / 16)), 'restored HP from the Grassy Terrain');
+    }
+    // Held items
+    for (const mon of order()) {
+      const frac = getItem(mon)?.endOfTurnHp?.(mon) ?? 0;
+      if (frac > 0) this.heal(mon, Math.max(1, Math.floor(mon.stats.hp * frac)), `restored HP with its ${mon.item}`);
+      if (frac < 0 && !getAbility(mon)?.magicGuard) this.hurt(mon, Math.max(1, Math.floor(mon.stats.hp * -frac)), `was hurt by its ${mon.item}`);
+    }
+    // Status damage
+    for (const mon of order()) {
       const ab = getAbility(mon);
       const max = mon.stats.hp;
       if (mon.status === 'tox') mon.toxicCounter = Math.min(15, mon.toxicCounter + 1);
@@ -847,9 +1134,9 @@ class TurnRunner {
         if (mon.status === 'tox') this.hurt(mon, Math.max(1, Math.floor((max * mon.toxicCounter) / 16)), 'was hurt by poison');
       }
     }
-    for (const mon of order) {
+    for (const mon of order()) {
       const ab = getAbility(mon);
-      if (isAlive(mon) && ab?.endOfTurnBoosts) {
+      if (ab?.endOfTurnBoosts) {
         this.log('info', `${mon.name}'s ${abilityName(mon)}!`, mon.side);
         this.applyBoosts(mon, ab.endOfTurnBoosts, null);
       }
@@ -864,6 +1151,17 @@ class TurnRunner {
       tick('lightScreen', `${this.teamName(s)}'s Light Screen wore off!`);
     });
     if (this.s.trickRoom > 0 && --this.s.trickRoom === 0) this.log('field', 'The twisted dimensions returned to normal!');
+    if (this.s.weather && this.s.weatherTurns > 0 && --this.s.weatherTurns === 0) {
+      const ended: Record<Weather, string> = {
+        sun: 'The harsh sunlight faded.', rain: 'The rain stopped.', sand: 'The sandstorm subsided.', snow: 'The snow stopped.',
+      };
+      this.log('field', ended[this.s.weather]);
+      this.s.weather = null;
+    }
+    if (this.s.terrain && this.s.terrainTurns > 0 && --this.s.terrainTurns === 0) {
+      this.log('field', `The ${TERRAIN_LABELS[this.s.terrain]} disappeared.`);
+      this.s.terrain = null;
+    }
     for (const mon of allMons(this.s)) if (isAlive(mon)) mon.turnsActive++;
   }
 

@@ -216,6 +216,9 @@ input.num.mult { width: 64px; }
 .target-btn.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
 .random-btn { justify-self: start; }
 .math-table { overflow-x: auto; }
+.field-select { font-size: 13px; color: var(--muted); }
+.field-select select { color: var(--text); }
+.flag-row { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin-top: 6px; font-size: 13px; }
 .field { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 16px; }
 .combatant { display: grid; gap: 10px; align-content: start; min-width: 0; }
 .mon-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 12px; transition: opacity 0.3s; }

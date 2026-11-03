@@ -1,6 +1,6 @@
 import { MOVE_LIBRARY } from '../data/presets';
-import { BOOSTABLE_STATS, BOOST_LABELS, MAJOR_STATUSES, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, TYPES } from '../engine/types';
-import type { Boosts, MajorStatus, Move, MoveCategory, MoveEffects, MoveSpecial, MoveTarget, TypeName } from '../engine/types';
+import { BOOSTABLE_STATS, BOOST_LABELS, MAJOR_STATUSES, MOVE_FLAGS, MOVE_SPECIALS, MOVE_SPECIAL_LABELS, MOVE_TARGETS, MOVE_TARGET_LABELS, STATUS_LABELS, TYPES } from '../engine/types';
+import type { Boosts, MajorStatus, Move, MoveCategory, MoveEffects, MoveFlag, MoveSpecial, MoveTarget, TypeName } from '../engine/types';
 import { NumField, TypeBadge } from './common';
 
 const CATEGORIES: MoveCategory[] = ['Physical', 'Special', 'Status'];
@@ -99,6 +99,23 @@ export function MoveEditor({
               </select>
             </label>
           </div>
+          <div className="flag-row">
+            <span className="effect-label">Flags</span>
+            {MOVE_FLAGS.map((f) => (
+              <label key={f} className="check-label">
+                <input
+                  type="checkbox"
+                  checked={!!move.flags?.includes(f)}
+                  onChange={(e) => {
+                    const next: MoveFlag[] = e.target.checked ? [...(move.flags ?? []), f] : (move.flags ?? []).filter((x) => x !== f);
+                    const { flags: _drop, ...rest } = move;
+                    onChange(next.length ? { ...rest, flags: next } : rest);
+                  }}
+                />
+                {f === 'contact' ? 'Contact' : f[0].toUpperCase() + f.slice(1)}
+              </label>
+            ))}
+          </div>
           <EffectsEditor effects={move.effects} isStatus={move.category === 'Status'} onChange={setEffects} />
         </>
       )}
@@ -116,6 +133,9 @@ function summarize(e: MoveEffects): string {
   if (e.recoil) parts.push(`recoil ${e.recoil}%`);
   if (e.heal) parts.push(`heal ${e.heal}%`);
   if (e.flinch) parts.push(`${e.flinch}% flinch`);
+  if (e.confuse) parts.push(`${e.confuse}% confuse`);
+  if (e.multiHit) parts.push(e.multiHit[0] === e.multiHit[1] ? `${e.multiHit[0]} hits` : `${e.multiHit[0]}–${e.multiHit[1]} hits`);
+  if (e.fixedDamage !== undefined) parts.push(e.fixedDamage === 'level' ? 'damage = level' : e.fixedDamage === 'halfHp' ? 'halves HP' : `${e.fixedDamage} fixed damage`);
   return parts.join(', ') || 'none';
 }
 
@@ -172,7 +192,40 @@ function EffectsEditor({
           {isStatus && (
             <label className="inline">Heal target <NumField value={effects.heal ?? 0} min={0} max={100} onChange={(n) => update({ heal: n || undefined })} />% max HP</label>
           )}
+          <label className="inline">Confuse <NumField value={effects.confuse ?? 0} min={0} max={100} onChange={(n) => update({ confuse: n || undefined })} />%</label>
         </div>
+        {!isStatus && (
+          <div className="effect-row">
+            <label className="inline">Hits
+              <NumField value={effects.multiHit?.[0] ?? 1} min={1} max={10} onChange={(n) => {
+                const max = Math.max(n, effects.multiHit?.[1] ?? n);
+                update({ multiHit: n === 1 && max === 1 ? undefined : [n, max] });
+              }} />
+              to
+              <NumField value={effects.multiHit?.[1] ?? 1} min={1} max={10} onChange={(n) => {
+                const min = Math.min(n, effects.multiHit?.[0] ?? 1);
+                update({ multiHit: n === 1 && min === 1 ? undefined : [min, n] });
+              }} />
+            </label>
+            <label className="inline">Fixed damage
+              <select
+                value={effects.fixedDamage === undefined ? '' : typeof effects.fixedDamage === 'number' ? 'number' : effects.fixedDamage}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  update({ fixedDamage: v === '' ? undefined : v === 'number' ? 40 : (v as 'level' | 'halfHp') });
+                }}
+              >
+                <option value="">No (use the formula)</option>
+                <option value="level">Equal to user’s level</option>
+                <option value="halfHp">Half the target’s HP</option>
+                <option value="number">A set amount</option>
+              </select>
+              {typeof effects.fixedDamage === 'number' && (
+                <><NumField value={effects.fixedDamage} min={1} max={999} onChange={(n) => update({ fixedDamage: n })} /> HP</>
+              )}
+            </label>
+          </div>
+        )}
       </div>
     </details>
   );

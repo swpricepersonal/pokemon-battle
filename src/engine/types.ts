@@ -47,7 +47,26 @@ export interface MoveEffects {
   heal?: number;
   /** Chance (%) to make the target flinch if it hasn't moved yet this turn. */
   flinch?: number;
+  /** Chance (%) to confuse the target. */
+  confuse?: number;
+  /** Hits a random number of times in this range (2–5 uses the games' 35/35/15/15% odds). */
+  multiHit?: [number, number];
+  /** Deals fixed damage: the user's level, half the target's current HP, or a set number. */
+  fixedDamage?: 'level' | 'halfHp' | number;
 }
+
+export const MOVE_FLAGS = ['contact', 'punch', 'bite', 'pulse', 'sound', 'powder'] as const;
+export type MoveFlag = (typeof MOVE_FLAGS)[number];
+
+export const WEATHERS = ['sun', 'rain', 'sand', 'snow'] as const;
+export type Weather = (typeof WEATHERS)[number];
+export const WEATHER_LABELS: Record<Weather, string> = { sun: 'Harsh sunlight', rain: 'Rain', sand: 'Sandstorm', snow: 'Snow' };
+
+export const TERRAINS = ['electric', 'grassy', 'psychic', 'misty'] as const;
+export type Terrain = (typeof TERRAINS)[number];
+export const TERRAIN_LABELS: Record<Terrain, string> = {
+  electric: 'Electric Terrain', grassy: 'Grassy Terrain', psychic: 'Psychic Terrain', misty: 'Misty Terrain',
+};
 
 /** Who a move hits. In singles, every foe-targeting option means "the foe". */
 export const MOVE_TARGETS = ['normal', 'self', 'ally', 'selfAndAlly', 'adjacentFoes', 'allAdjacent', 'allySide', 'field'] as const;
@@ -68,6 +87,8 @@ export const MOVE_TARGET_LABELS: Record<MoveTarget, string> = {
 export const MOVE_SPECIALS = [
   'protect', 'wideGuard', 'quickGuard', 'followMe', 'ragePowder', 'spotlight', 'helpingHand', 'fakeOut',
   'allySwitch', 'afterYou', 'quash', 'pollenPuff', 'tailwind', 'trickRoom', 'reflect', 'lightScreen',
+  'sunnyDay', 'rainDance', 'sandstorm', 'snowscape', 'electricTerrain', 'grassyTerrain', 'psychicTerrain', 'mistyTerrain',
+  'weatherBall', 'stormAccuracy', 'snowAccuracy', 'instruct', 'beatUp',
 ] as const;
 export type MoveSpecial = (typeof MOVE_SPECIALS)[number];
 
@@ -88,6 +109,19 @@ export const MOVE_SPECIAL_LABELS: Record<MoveSpecial, string> = {
   trickRoom: 'Trick Room (slower moves first, 5 turns)',
   reflect: 'Reflect (physical damage reduced, 5 turns)',
   lightScreen: 'Light Screen (special damage reduced, 5 turns)',
+  sunnyDay: 'Sunny Day (sun, 5 turns)',
+  rainDance: 'Rain Dance (rain, 5 turns)',
+  sandstorm: 'Sandstorm (sand, 5 turns)',
+  snowscape: 'Snowscape (snow, 5 turns)',
+  electricTerrain: 'Electric Terrain (5 turns)',
+  grassyTerrain: 'Grassy Terrain (5 turns)',
+  psychicTerrain: 'Psychic Terrain (5 turns)',
+  mistyTerrain: 'Misty Terrain (5 turns)',
+  weatherBall: 'Weather Ball (type and power follow the weather)',
+  stormAccuracy: 'Never misses in rain, 50% accuracy in sun',
+  snowAccuracy: 'Never misses in snow',
+  instruct: 'Instruct (target repeats its last move)',
+  beatUp: 'Beat Up (one hit per healthy team member)',
 };
 
 export interface Move {
@@ -103,6 +137,8 @@ export interface Move {
   highCrit: boolean;
   target: MoveTarget;
   special?: MoveSpecial;
+  /** Contact, punch, bite, pulse, sound and powder flags used by abilities and items. */
+  flags?: MoveFlag[];
   effects: MoveEffects;
 }
 
@@ -137,6 +173,13 @@ export interface CustomAbility {
   onStartFoeBoosts: Partial<Boosts>;
   /** Applied to the user at the end of each turn (Speed Boost = spe +1). */
   endOfTurnBoosts: Partial<Boosts>;
+  /** Sets weather / terrain for 5 turns when the battle starts (Drought, Electric Surge). */
+  onStartWeather: Weather | null;
+  onStartTerrain: Terrain | null;
+  /** Chance (%) to inflict a status on a Pokémon that makes contact (Static = par 30). */
+  contactStatus: { status: MajorStatus; chance: number } | null;
+  /** % of the attacker's max HP lost when it makes contact (Rough Skin = 12.5). */
+  contactDamage: number;
 }
 
 export interface PokemonBuild {
@@ -207,5 +250,9 @@ export interface BattlePokemon {
   flashFire: boolean;
   /** The faint message has been logged. */
   faintLogged: boolean;
+  /** Confusion turns remaining (0 = not confused). */
+  confusion: number;
+  /** The last move this Pokémon used (for Instruct). */
+  lastAction: { move: number; target?: { side: Side; slot: number } } | null;
   vol: TurnVolatiles;
 }

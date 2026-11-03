@@ -1,9 +1,9 @@
 import type { DamageCtx } from './abilities';
-import type { BattlePokemon, TypeName } from './types';
+import type { BattlePokemon, TypeName, Weather } from './types';
 
 export interface ItemDef {
   desc: string;
-  group: 'Choice' | 'Power' | 'Defense' | 'Type boost' | 'Resist berry' | 'Other';
+  group: 'Choice' | 'Power' | 'Defense' | 'Recovery' | 'Contact' | 'Field' | 'Type boost' | 'Resist berry' | 'Other';
   basePower?(c: DamageCtx): number;
   attack?(c: DamageCtx): number;
   defense?(c: DamageCtx): number;
@@ -20,6 +20,20 @@ export interface ItemDef {
   focusSash?: boolean;
   /** Screens last 8 turns instead of 5. */
   lightClay?: boolean;
+  /** End-of-turn HP change as a fraction of max HP (Leftovers = 1/16). */
+  endOfTurnHp?(mon: BattlePokemon): number;
+  /** Heals when HP drops to half or less, then is used up. Fraction of max HP, or flat HP when `flat`. */
+  pinchHeal?: { amount: number; flat?: boolean };
+  /** Cures a status condition or confusion, then is used up. */
+  lum?: boolean;
+  /** Heals this fraction of the damage the holder deals. */
+  shellBell?: number;
+  /** An attacker that makes contact loses this fraction of its max HP. */
+  contactDamage?: number;
+  /** Weather it sets lasts 8 turns. */
+  extendsWeather?: Weather;
+  /** Terrain it sets lasts 8 turns. */
+  extendsTerrain?: boolean;
 }
 
 const TYPE_BOOSTERS: [string, TypeName][] = [
@@ -49,7 +63,22 @@ export const ITEMS: Record<string, ItemDef> = {
   'Assault Vest': { group: 'Defense', desc: 'Sp. Def ×1.5, but can’t use status moves.', noStatusMoves: true, defense: (c) => (c.move.category === 'Special' ? 1.5 : 1) },
   Eviolite: { group: 'Defense', desc: 'Defense and Sp. Def ×1.5 (for Pokémon that can still evolve).', defense: () => 1.5 },
   'Focus Sash': { group: 'Defense', desc: 'Survives one hit from full HP with 1 HP, then is used up.', focusSash: true },
-  'Light Clay': { group: 'Other', desc: 'Reflect and Light Screen last 8 turns.', lightClay: true },
+  Leftovers: { group: 'Recovery', desc: 'Heals 1/16 max HP at the end of each turn.', endOfTurnHp: () => 1 / 16 },
+  'Black Sludge': {
+    group: 'Recovery', desc: 'Poison types heal 1/16 max HP each turn; anything else loses 1/8.',
+    endOfTurnHp: (mon) => (mon.build.type1 === 'Poison' || mon.build.type2 === 'Poison' ? 1 / 16 : -1 / 8),
+  },
+  'Sitrus Berry': { group: 'Recovery', desc: 'Heals 25% max HP at half HP or less, then is used up.', pinchHeal: { amount: 0.25 } },
+  'Oran Berry': { group: 'Recovery', desc: 'Heals 10 HP at half HP or less, then is used up.', pinchHeal: { amount: 10, flat: true } },
+  'Lum Berry': { group: 'Recovery', desc: 'Cures any status condition or confusion once, then is used up.', lum: true },
+  'Shell Bell': { group: 'Recovery', desc: 'Heals 1/8 of the damage the holder deals.', shellBell: 1 / 8 },
+  'Rocky Helmet': { group: 'Contact', desc: 'A Pokémon that makes contact with the holder loses 1/6 of its max HP.', contactDamage: 1 / 6 },
+  'Heat Rock': { group: 'Field', desc: 'Harsh sunlight the holder sets lasts 8 turns.', extendsWeather: 'sun' },
+  'Damp Rock': { group: 'Field', desc: 'Rain the holder sets lasts 8 turns.', extendsWeather: 'rain' },
+  'Smooth Rock': { group: 'Field', desc: 'A sandstorm the holder sets lasts 8 turns.', extendsWeather: 'sand' },
+  'Icy Rock': { group: 'Field', desc: 'Snow the holder sets lasts 8 turns.', extendsWeather: 'snow' },
+  'Terrain Extender': { group: 'Field', desc: 'Terrain the holder sets lasts 8 turns.', extendsTerrain: true },
+  'Light Clay': { group: 'Field', desc: 'Reflect and Light Screen last 8 turns.', lightClay: true },
 };
 
 for (const [name, type] of TYPE_BOOSTERS) {
@@ -63,7 +92,7 @@ for (const [name, type] of RESIST_BERRIES) {
   };
 }
 
-export const ITEM_GROUPS: ItemDef['group'][] = ['Choice', 'Power', 'Defense', 'Type boost', 'Resist berry', 'Other'];
+export const ITEM_GROUPS: ItemDef['group'][] = ['Choice', 'Power', 'Defense', 'Recovery', 'Contact', 'Field', 'Type boost', 'Resist berry'];
 
 export function getItem(mon: BattlePokemon): ItemDef | null {
   return mon.item ? ITEMS[mon.item] ?? null : null;
