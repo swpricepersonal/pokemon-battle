@@ -1,4 +1,4 @@
-import { CUSTOM_ABILITY } from './types';
+import { CUSTOM_ABILITY, typesOf } from './types';
 import type { BattlePokemon, Boosts, CustomAbility, MajorStatus, Move, Terrain, TypeName, Weather } from './types';
 
 /** Context passed to damage-related ability hooks. */
@@ -128,7 +128,7 @@ function statusImmunity(statuses: MajorStatus[], what: string): AbilityDef {
 export function hasSecondary(move: Move): boolean {
   if (move.category === 'Status') return false;
   const e = move.effects;
-  return !!(e.status || e.targetBoosts || e.flinch || e.confuse);
+  return !!(e.status || e.targetBoosts || e.flinch || e.confuse || e.healBlock);
 }
 
 export const ABILITIES: Record<string, AbilityDef> = {
@@ -328,6 +328,8 @@ export function blankCustomAbility(): CustomAbility {
     onStartTerrain: null,
     contactStatus: null,
     contactDamage: 0,
+    simple: false,
+    contrary: false,
   };
 }
 
@@ -360,6 +362,9 @@ export function compileCustomAbility(c: CustomAbility): AbilityDef {
     def.immune = (ctx) => (ctx.move.type === type ? result : null);
   }
   if (c.critImmune) def.critImmune = true;
+  if (c.simple) def.simple = true;
+  if (c.contrary) def.contrary = true;
+  if (c.simple || c.contrary) def.breakable = true;
   if (c.statusImmune.length) def.statusImmune = c.statusImmune;
   if (hasBoosts(c.onStartFoeBoosts)) def.onStartFoeBoosts = c.onStartFoeBoosts;
   if (hasBoosts(c.endOfTurnBoosts)) def.endOfTurnBoosts = c.endOfTurnBoosts;
@@ -374,19 +379,23 @@ export function compileCustomAbility(c: CustomAbility): AbilityDef {
   return def;
 }
 
+/** The ability name and custom definition currently in effect (they can change mid-battle). */
+function currentAbility(mon: BattlePokemon): { ability: string; custom?: CustomAbility } {
+  return mon.ability !== undefined ? { ability: mon.ability, custom: mon.customAbility } : { ability: mon.build.ability, custom: mon.build.customAbility };
+}
+
 export function abilityName(mon: BattlePokemon): string {
-  const a = mon.build.ability;
-  return a === CUSTOM_ABILITY ? mon.build.customAbility?.name || 'Custom ability' : a;
+  const { ability, custom } = currentAbility(mon);
+  return ability === CUSTOM_ABILITY ? custom?.name || 'Custom ability' : ability;
 }
 
 const customCache = new WeakMap<CustomAbility, AbilityDef>();
 
 /** The Pokémon's ability hooks, or null if it has none. */
 export function getAbility(mon: BattlePokemon): AbilityDef | null {
-  const a = mon.build.ability;
+  const { ability: a, custom: c } = currentAbility(mon);
   if (!a) return null;
   if (a === CUSTOM_ABILITY) {
-    const c = mon.build.customAbility;
     if (!c) return null;
     let def = customCache.get(c);
     if (!def) customCache.set(c, (def = compileCustomAbility(c)));
@@ -405,6 +414,6 @@ export function defenderAbility(defender: BattlePokemon, attacker: BattlePokemon
 
 /** Grounded Pokémon are affected by terrain (not Flying types or Levitate). */
 export function isGrounded(mon: BattlePokemon): boolean {
-  if (mon.build.type1 === 'Flying' || mon.build.type2 === 'Flying') return false;
+  if (typesOf(mon).includes('Flying')) return false;
   return !getAbility(mon)?.airborne;
 }

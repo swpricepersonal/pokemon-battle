@@ -53,7 +53,40 @@ export interface MoveEffects {
   multiHit?: [number, number];
   /** Deals fixed damage: the user's level, half the target's current HP, or a set number. */
   fixedDamage?: 'level' | 'halfHp' | number;
+  /** Heal Block on the target for this many turns: it can't restore HP (Heal Block = 5, Psychic Noise = 2). */
+  healBlock?: number;
+  /** Changes the target's type: add one (Trick-or-Treat) or replace its types (Soak). */
+  typeChange?: { mode: 'add' | 'replace'; types: TypeName[] };
+  /**
+   * Changes the target's ability: a preset name, CUSTOM_ABILITY with `customAbility`, '' to remove it,
+   * COPY_USER_ABILITY (Entrainment) or SWAP_ABILITIES (Skill Swap).
+   */
+  targetAbility?: { ability: string; customAbility?: CustomAbility };
+  /** Protect variants: what happens to a Pokémon that makes contact with the protected user (Spiky Shield, Obstruct). */
+  protectContact?: { damage?: number; status?: MajorStatus; boosts?: Partial<Boosts> };
+  /** Protect variants that only block damaging moves (King's Shield, Obstruct). */
+  protectAttacksOnly?: boolean;
+  /** Lays an entry hazard on the foes' side. */
+  hazard?: Hazard;
+  /** Removes entry hazards from the user's side ('own', Rapid Spin) or both sides ('both', Defog). */
+  clearHazards?: 'own' | 'both';
+  /** The user switches out after the move: 'switch' (U-turn) or 'batonPass' (passes stat changes and more). */
+  selfSwitch?: 'switch' | 'batonPass';
+  /** The target is dragged out and replaced by a random team member (Roar, Dragon Tail). */
+  forceSwitch?: boolean;
 }
+
+export const HAZARDS = ['stealthRock', 'spikes', 'toxicSpikes', 'stickyWeb'] as const;
+export type Hazard = (typeof HAZARDS)[number];
+export const HAZARD_LABELS: Record<Hazard, string> = {
+  stealthRock: 'Stealth Rock', spikes: 'Spikes', toxicSpikes: 'Toxic Spikes', stickyWeb: 'Sticky Web',
+};
+/** Most layers each hazard can have. */
+export const HAZARD_MAX: Record<Hazard, number> = { stealthRock: 1, spikes: 3, toxicSpikes: 2, stickyWeb: 1 };
+
+/** targetAbility values that copy the user's ability onto the target, or swap the two. */
+export const COPY_USER_ABILITY = '@user';
+export const SWAP_ABILITIES = '@swap';
 
 export const MOVE_FLAGS = ['contact', 'punch', 'bite', 'pulse', 'sound', 'powder'] as const;
 export type MoveFlag = (typeof MOVE_FLAGS)[number];
@@ -90,6 +123,7 @@ export const MOVE_SPECIALS = [
   'sunnyDay', 'rainDance', 'sandstorm', 'snowscape', 'electricTerrain', 'grassyTerrain', 'psychicTerrain', 'mistyTerrain',
   'weatherBall', 'stormAccuracy', 'snowAccuracy', 'instruct', 'beatUp',
   'taunt', 'encore', 'substitute', 'leechSeed', 'disable', 'torment', 'yawn', 'perishSong',
+  'wonderRoom', 'magicRoom',
 ] as const;
 export type MoveSpecial = (typeof MOVE_SPECIALS)[number];
 
@@ -131,6 +165,8 @@ export const MOVE_SPECIAL_LABELS: Record<MoveSpecial, string> = {
   torment: 'Torment (target can’t repeat a move)',
   yawn: 'Yawn (target falls asleep next turn)',
   perishSong: 'Perish Song (all who hear it faint in 3 turns)',
+  wonderRoom: 'Wonder Room (Defense and Sp. Def swap, 5 turns)',
+  magicRoom: 'Magic Room (held items do nothing, 5 turns)',
 };
 
 export interface Move {
@@ -189,6 +225,10 @@ export interface CustomAbility {
   contactStatus: { status: MajorStatus; chance: number } | null;
   /** % of the attacker's max HP lost when it makes contact (Rough Skin = 12.5). */
   contactDamage: number;
+  /** Stat changes are doubled (Simple). */
+  simple?: boolean;
+  /** Stat changes are reversed (Contrary). */
+  contrary?: boolean;
 }
 
 export interface PokemonBuild {
@@ -222,7 +262,8 @@ export const NATURE_NAMES = Object.keys(NATURES) as NatureName[];
 /** Per-turn flags, reset at the start of every turn. */
 export interface TurnVolatiles {
   moved: boolean;
-  protected: boolean;
+  /** Protected this turn, with the protect move's extra behavior. */
+  protect: { contact?: MoveEffects['protectContact']; attacksOnly?: boolean } | null;
   flinched: boolean;
   helpingHand: boolean;
   /** Set by Follow Me / Spotlight ('followMe') or Rage Powder ('powder', ignored by Grass types). */
@@ -236,7 +277,19 @@ export interface BattlePokemon {
   /** Display name (made unique within the battle). */
   name: string;
   side: Side;
+  /** Position in its team (0–5). */
+  teamIndex: number;
   build: PokemonBuild;
+  /** Current ability (moves like Simple Beam change it; it resets on switching out). */
+  ability: string;
+  customAbility?: CustomAbility;
+  /** Current types (Soak replaces them) plus a type added by Trick-or-Treat / Forest's Curse. */
+  types: TypeName[];
+  addedType: TypeName | null;
+  /** Turns of Heal Block left (0 = none). */
+  healBlock: number;
+  /** Held items have no effect (Magic Room). */
+  itemsSuppressed: boolean;
   stats: StatTable;
   currentHp: number;
   status: MajorStatus | null;
@@ -280,4 +333,10 @@ export interface BattlePokemon {
   /** The last move this Pokémon used (for Instruct, Encore, Disable and Torment). */
   lastAction: { move: number; target?: { side: Side; slot: number } } | null;
   vol: TurnVolatiles;
+}
+
+/** The Pokémon's current types, including an added type. */
+export function typesOf(p: BattlePokemon): TypeName[] {
+  const base = p.types ?? (p.build.type2 && p.build.type2 !== p.build.type1 ? [p.build.type1, p.build.type2] : [p.build.type1]);
+  return p.addedType && !base.includes(p.addedType) ? [...base, p.addedType] : base;
 }

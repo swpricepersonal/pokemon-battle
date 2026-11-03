@@ -4,7 +4,10 @@ import { getItem } from './items';
 import { applyMod, chainMods, fmtMod, modify } from './modifiers';
 import { stageMultiplier } from './stats';
 import { typeMultiplier } from './typeChart';
+import { typesOf } from './types';
 import type { BattlePokemon, Move, Terrain, TypeName, Weather } from './types';
+
+export { typesOf };
 
 export const CRIT_MULTIPLIER = 1.5;
 /** Crit chance by crit stage (Gen 7+): 1/24, 1/8, 1/2, guaranteed. */
@@ -58,6 +61,8 @@ export interface DamageOptions {
   /** Active weather (null when none or suppressed by Cloud Nine). */
   weather?: Weather | null;
   terrain?: Terrain | null;
+  /** Wonder Room: each Pokémon's Defense and Sp. Def stats are swapped (stat stages aren't). */
+  wonderRoom?: boolean;
 }
 
 const TERRAIN_TYPE: Record<Terrain, TypeName> = { electric: 'Electric', grassy: 'Grass', psychic: 'Psychic', misty: 'Fairy' };
@@ -66,10 +71,6 @@ const GRASSY_HALVED = new Set(['Earthquake', 'Bulldoze', 'Magnitude']);
 /** Round to nearest integer, with .5 rounding down (Game Freak's rounding). */
 export function pokeRound(n: number): number {
   return n % 1 > 0.5 ? Math.ceil(n) : Math.floor(n);
-}
-
-export function typesOf(p: BattlePokemon): TypeName[] {
-  return p.build.type2 && p.build.type2 !== p.build.type1 ? [p.build.type1, p.build.type2] : [p.build.type1];
 }
 
 /** Type effectiveness including Scrappy. */
@@ -157,12 +158,13 @@ export function calcDamage(
     weather === 'snow' && physical && defTypes.includes('Ice') ? ['Snow', 1.5] : null,
   ]);
   const attack = Math.max(1, applyMod(Math.floor(attacker.stats[atkKey] * stageMultiplier(atkStage)), chainMods(attackMods.map((m) => m[1]))));
-  const defense = Math.max(1, applyMod(Math.floor(defender.stats[defKey] * stageMultiplier(defStage)), chainMods(defenseMods.map((m) => m[1]))));
+  const rawDefKey = opts.wonderRoom ? (physical ? 'spd' : 'def') : defKey;
+  const defense = Math.max(1, applyMod(Math.floor(defender.stats[rawDefKey] * stageMultiplier(defStage)), chainMods(defenseMods.map((m) => m[1]))));
   const level = attacker.build.level;
 
   const fmtStage = (n: number) => (n === 0 ? '' : ` (${n > 0 ? '+' : ''}${n})`);
   const attackLabel = `${physical ? 'Atk' : 'SpA'}${fmtStage(atkStage)}`;
-  const defenseLabel = `${physical ? 'Def' : 'SpD'}${fmtStage(defStage)}`;
+  const defenseLabel = `${physical ? 'Def' : 'SpD'}${opts.wonderRoom ? ` (Wonder Room: ${physical ? 'SpD' : 'Def'} stat)` : ''}${fmtStage(defStage)}`;
 
   const baseDamage = Math.floor(Math.floor((Math.floor((2 * level) / 5 + 2) * power * attack) / defense) / 50) + 2;
   const steps: DamageStep[] = [{ label: 'Base damage', multiplier: '', result: baseDamage }];
